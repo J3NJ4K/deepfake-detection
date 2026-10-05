@@ -37,8 +37,16 @@ pip install -r requirements.txt
 large binary weight files are excluded from git via .gitignore to prevent repository bloat
 - where to store weights:
 all downloaded model weights must be placed locally inside the models/ directory
-- download link:
-uhhh we'll add one later i guess
+
+**Download links:**
+
+### Face detection (YuNet)
+
+Download into `models/`:
+
+    Invoke-WebRequest -Uri "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx" -OutFile "models/face_detection_yunet_2023mar.onnx"
+
+(macOS/Linux: `curl -L -o models/face_detection_yunet_2023mar.onnx <same url>`)
 
 ### Project architecture
 the codebase uses a modular layoutu to support parallel development without merge conflicts:
