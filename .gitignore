@@ -222,3 +222,11 @@ models/*.pth
 models/*.pt
 models/*.onnx
 venv/
+
+#Added by Marga
+.idea/
+
+#test images
+/test*.jpg
+/test*.png
+
