@@ -11,6 +11,7 @@ from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import ImageCanvas
 from ui.zoom_control import ZoomControl
 from ui.utils import load_icon, numpy_to_qimage, read_image_unicode, write_image_unicode
+from core.transform import rotate_left, rotate_right
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -74,13 +75,13 @@ class MainWindow(QMainWindow):
         self.rot_ccw_act = QAction(icon_ccw, "", self) if icon_ccw else QAction("↺", self)
         self.rot_ccw_act.setToolTip("Rotate 90° Counter-Clockwise (Ctrl+Shift+R)")
         self.rot_ccw_act.setShortcut("Ctrl+Shift+R")
-        self.rot_ccw_act.triggered.connect(self._action_placeholder)
+        self.rot_ccw_act.triggered.connect(lambda: self._apply_edit(rotate_left))
 
         icon_cw = load_icon("rotate_right")
         self.rot_cw_act = QAction(icon_cw, "", self) if icon_cw else QAction("↻", self)
         self.rot_cw_act.setToolTip("Rotate 90° Clockwise (Ctrl+R)")
         self.rot_cw_act.setShortcut("Ctrl+R")
-        self.rot_cw_act.triggered.connect(self._action_placeholder)
+        self.rot_cw_act.triggered.connect(lambda: self._apply_edit(rotate_right))
 
     def _create_menus(self):
         menubar = self.menuBar()
@@ -184,6 +185,18 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Saved successfully: {path}", 4000)
         else:
             QMessageBox.critical(self, "Error", f"Failed to save image to:\n{path}")
+
+
+    def _apply_edit(self, operation, *args):
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Open an image first.")
+            return
+        try:
+            self.current_image = operation(self.current_image, *args)
+        except ValueError as error:
+            QMessageBox.warning(self, "Warning", str(error))
+            return
+        self._update_display()
 
     def _action_placeholder(self):
         source_action = self.sender().text().replace("&", "")
