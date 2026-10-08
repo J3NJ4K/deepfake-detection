@@ -5,6 +5,8 @@ a photo editor integrating deepfake detection models and image analysis tools.
 
 I tried to make it as clean and organized as possible, lmk if you guys wanna change stuff
 
+actually i just realized maybe you guys know how to do all of this but i personnaly dont O_O
+
 ## Quickstart and setup
 each team member have to setup their isolated local environment using the following steps:
 
@@ -28,6 +30,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 python3 -m venv venv
 source venv/bin/activate
 ```
+
 ### 3. Install project dependecies
 idk if it has everything we need but we can still add them further on
 ```bash
@@ -57,15 +60,16 @@ the codebase uses a modular layoutu to support parallel development without merg
 - main.py : main entry point to launch the app
 
 ### Git workflow
-actually i just realized maybe you guys know how to do all of this but i personnaly dont O_O
 1. dont commit directly to main
-2. create dedicated feature branch for each task :
+2. create dedicated feature branch for each task : 
+
+we'll figure this out together ig
 ```bash
 git checkout main
 git pull origin main
 git checkout -b feature/your-feature-name
 ```
-we'll figure this out together ig
+
 3. commit and push your branch:
 ```bash
 git add .
