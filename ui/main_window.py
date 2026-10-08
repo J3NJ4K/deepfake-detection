@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar, 
-    QFileDialog, QWidget, QSizePolicy
+    QFileDialog, QWidget, QSizePolicy, QInputDialog
 )
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtCore import Qt, QSize
@@ -11,7 +11,7 @@ from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import ImageCanvas
 from ui.zoom_control import ZoomControl
 from ui.utils import load_icon, numpy_to_qimage, read_image_unicode, write_image_unicode
-from core.transform import rotate_left, rotate_right
+from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -83,6 +83,16 @@ class MainWindow(QMainWindow):
         self.rot_cw_act.setShortcut("Ctrl+R")
         self.rot_cw_act.triggered.connect(lambda: self._apply_edit(rotate_right))
 
+        # --- Image Menu ---
+        self.flip_h_act = QAction("Flip &Horizontal", self)
+        self.flip_h_act.triggered.connect(lambda: self._apply_edit(flip_horizontal))
+
+        self.flip_v_act = QAction("Flip &Vertical", self)
+        self.flip_v_act.triggered.connect(lambda: self._apply_edit(flip_vertical))
+
+        self.resize_act = QAction("&Resize...", self)
+        self.resize_act.triggered.connect(self.resize_image)
+
     def _create_menus(self):
         menubar = self.menuBar()
 
@@ -93,6 +103,15 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_as_act)
         file_menu.addSeparator()
         file_menu.addAction(self.quit_act)
+
+        image_menu = menubar.addMenu("&Image")
+        image_menu.addAction(self.rot_ccw_act)
+        image_menu.addAction(self.rot_cw_act)
+        image_menu.addSeparator()
+        image_menu.addAction(self.flip_h_act)
+        image_menu.addAction(self.flip_v_act)
+        image_menu.addSeparator()
+        image_menu.addAction(self.resize_act)
 
         filters_menu = menubar.addMenu("&Filters")
         filters_menu.addAction(self.filter_gaussian_act)
@@ -186,7 +205,6 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", f"Failed to save image to:\n{path}")
 
-
     def _apply_edit(self, operation, *args):
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "Open an image first.")
@@ -197,6 +215,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", str(error))
             return
         self._update_display()
+
+    def resize_image(self):
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Open an image first.")
+            return
+        percent, ok = QInputDialog.getInt(self, "Resize", "Scale (%):", 50, 1, 400)
+        if ok:
+            self._apply_edit(resize_scale, percent / 100)
 
     def _action_placeholder(self):
         source_action = self.sender().text().replace("&", "")
