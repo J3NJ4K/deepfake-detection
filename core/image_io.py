@@ -37,7 +37,7 @@ def save_img(image, path):
         raise ValueError(f"Unsupported file extension {ext}")
 
     # RGB to BGR for OpenCV
-    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGRA)
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
     # encode image
     ok, buffer = cv2.imencode(ext, bgr)
