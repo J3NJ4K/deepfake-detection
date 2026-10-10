@@ -230,3 +230,4 @@ venv/
 /test*.jpg
 /test*.png
 
+faces_out.jpg

@@ -12,3 +12,8 @@ def load_model() -> Xception:
     model.load_state_dict(state_dict)
     model.eval()
     return model
+
+@torch.no_grad()
+def predict(model: Xception, tensor: torch.Tensor) -> float:
+    logits = model(tensor)
+    return torch.softmax(logits, dim=1)[0, 1].item()
