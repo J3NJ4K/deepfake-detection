@@ -51,6 +51,10 @@ Download into `models/`:
 
 (macOS/Linux: `curl -L -o models/face_detection_yunet_2023mar.onnx <same url>`)
 
+### Deepfake classifier (Xception, DeepfakeBench)
+
+Download `xception_best.pth` from https://github.com/SCLBD/DeepfakeBench/releases/tag/v1.0.1 into `models/`.
+
 ### Project architecture
 the codebase uses a modular layoutu to support parallel development without merge conflicts:
 - core/ : image processing
