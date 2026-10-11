@@ -15,6 +15,12 @@ from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vert
 from core.image_io import read_img, save_img
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
+from core.filters import (
+    binary_threshold,
+    gaussian_blur,
+    histogram_threshold,
+    sobel_filter,
+)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -119,14 +125,82 @@ class MainWindow(QMainWindow):
         image_menu.addSeparator()
         image_menu.addAction(self.resize_act)
 
-        filters_menu = menubar.addMenu("&Filters")
-        filters_menu.addAction(self.filter_gaussian_act)
-        filters_menu.addAction(self.filter_sobel_act)
-        filters_menu.addAction(self.filter_thresh_act)
+# ... tes autres menus (File, Edit, Detection...) ...
+
+        # Menu Filters
+        filters_menu = self.menuBar().addMenu("&Filters")
+
+        # Gaussian Blur
+        blur_action = filters_menu.addAction("Gaussian Blur")
+        blur_action.triggered.connect(self.apply_gaussian_blur)
+
+        # Sobel Filter
+        sobel_action = filters_menu.addAction("Sobel Filter (Edge Detection)")
+        sobel_action.triggered.connect(self.apply_sobel_filter)
+
+        filters_menu.addSeparator()
+
+        # Binary Threshold
+        binary_action = filters_menu.addAction("Binary Threshold")
+        binary_action.triggered.connect(self.apply_binary_threshold)
+
+        # Histogram / Otsu Threshold
+        otsu_action = filters_menu.addAction(
+            "Automatic Threshold (Otsu)"
+        )
+        otsu_action.triggered.connect(self.apply_histogram_threshold)
 
         detection_menu = menubar.addMenu("&Detection")
         detection_menu.addAction(self.face_detect_act)
         detection_menu.addAction(self.deepfake_act)
+
+    def apply_gaussian_blur(self):
+        if self.current_image is None:
+            self.statusBar().showMessage("Aucune image chargée", 3000)
+            return
+
+        try:
+            self.current_image = gaussian_blur(self.current_image, kernel_size=5)
+            self._update_display()
+            self.statusBar().showMessage("Gaussian Blur appliqué", 3000)
+        except Exception as e:
+            self.statusBar().showMessage(f"Erreur flou: {e}", 3000)
+
+    def apply_sobel_filter(self):
+        if self.current_image is None:
+            self.statusBar().showMessage("Aucune image chargée", 3000)
+            return
+
+        try:
+            self.current_image = sobel_filter(self.current_image)
+            self._update_display()
+            self.statusBar().showMessage("Filtre Sobel appliqué", 3000)
+        except Exception as e:
+            self.statusBar().showMessage(f"Erreur Sobel: {e}", 3000)
+
+    def apply_binary_threshold(self):
+        if self.current_image is None:
+            self.statusBar().showMessage("Aucune image chargée", 3000)
+            return
+
+        try:
+            self.current_image = binary_threshold(self.current_image, threshold=128)
+            self._update_display()
+            self.statusBar().showMessage("Seuillage binaire appliqué", 3000)
+        except Exception as e:
+            self.statusBar().showMessage(f"Erreur seuillage: {e}", 3000)
+
+    def apply_histogram_threshold(self):
+        if self.current_image is None:
+            self.statusBar().showMessage("Aucune image chargée", 3000)
+            return
+
+        try:
+            self.current_image = histogram_threshold(self.current_image)
+            self._update_display()
+            self.statusBar().showMessage("Seuillage Otsu appliqué", 3000)
+        except Exception as e:
+            self.statusBar().showMessage(f"Erreur Otsu: {e}", 3000)
 
     def run_face_detection(self):
         if self.current_image is None:
