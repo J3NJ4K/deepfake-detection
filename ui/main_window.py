@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
                 )
 
                 verdict = "Manipulated (Fake)" if is_fake else "Authentic (Real)"
-                summary_messages.append(f"Face #{i}: {verdict} ({prob * 100:.1f}% probability)")
+                summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
 
             # Mettre à jour l'image affichée
             self.current_image = annotated_image
