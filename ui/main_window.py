@@ -13,6 +13,8 @@ from ui.zoom_control import ZoomControl
 from ui.utils import load_icon, numpy_to_qimage, read_image_unicode, write_image_unicode
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale
 from core.image_io import read_img, save_img
+from detection.face_detector import detect_faces
+from detection.pipeline import analyze_deepfake
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -68,8 +70,11 @@ class MainWindow(QMainWindow):
         self.filter_thresh_act.triggered.connect(self._action_placeholder)
 
         # --- Detection Menu ---
+        self.face_detect_act = QAction("&Detect Faces", self)
+        self.face_detect_act.triggered.connect(self.run_face_detection)
+
         self.deepfake_act = QAction("&Run Deepfake Analysis", self)
-        self.deepfake_act.triggered.connect(self._action_placeholder)
+        self.deepfake_act.triggered.connect(self.run_deepfake_analysis)
 
         # --- Rotation Actions ---
         icon_ccw = load_icon("rotate_left")
@@ -120,7 +125,103 @@ class MainWindow(QMainWindow):
         filters_menu.addAction(self.filter_thresh_act)
 
         detection_menu = menubar.addMenu("&Detection")
+        detection_menu.addAction(self.face_detect_act)
         detection_menu.addAction(self.deepfake_act)
+
+    def run_face_detection(self):
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return
+
+        try:
+            boxes = detect_faces(self.current_image)
+            if not boxes:
+                QMessageBox.information(self, "Face Detection", "No faces detected in the image.")
+                return
+
+            # On fait une copie de travail pour dessiner sans altérer définitivement l'original si besoin
+            annotated_image = self.current_image.copy()
+            for (x1, y1, x2, y2) in boxes:
+                # Rectangle bleu (RGB: 0, 150, 255) avec épaisseur proportionnelle
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 150, 255), 2)
+
+            self.current_image = annotated_image
+            self._update_display()
+            self.status_bar.showMessage(f"Detected {len(boxes)} face(s).")
+            QMessageBox.information(self, "Face Detection", f"Successfully detected {len(boxes)} face(s).")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to run face detection: {e}")
+
+    def run_deepfake_analysis(self):
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return
+
+        self.status_bar.showMessage("Running deepfake analysis...")
+        try:
+            results = analyze_deepfake(self.current_image)
+            if not results:
+                QMessageBox.information(
+                    self, "Deepfake Detection", "No faces detected to analyze."
+                )
+                self.status_bar.showMessage("Analysis complete: No faces detected.")
+                return
+
+            annotated_image = self.current_image.copy()
+            summary_messages = []
+
+            for i, res in enumerate(results, start=1):
+                x1, y1, x2, y2 = res["bbox"]
+                prob = res["manipulation_probability"]
+                is_fake = prob >= 0.5
+
+                # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
+                color = (255, 50, 50) if is_fake else (50, 205, 50)
+                label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
+
+                # Dessiner le cadre
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
+
+                # Dessiner une étiquette texte au-dessus de la boîte
+                font_scale = 0.6
+                thickness = 2
+                (text_w, text_h), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+                )
+                # Fond plein sous le texte pour la lisibilité
+                cv2.rectangle(
+                    annotated_image,
+                    (x1, max(0, y1 - text_h - 10)),
+                    (x1 + text_w, y1),
+                    color,
+                    -1,
+                )
+                cv2.putText(
+                    annotated_image,
+                    label,
+                    (x1, max(text_h, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    (255, 255, 255),
+                    thickness,
+                    lineType=cv2.LINE_AA,
+                )
+
+                verdict = "Manipulated (Fake)" if is_fake else "Authentic (Real)"
+                summary_messages.append(f"Face #{i}: {verdict} ({prob * 100:.1f}% probability)")
+
+            # Mettre à jour l'image affichée
+            self.current_image = annotated_image
+            self._update_display()
+
+            report = "\n".join(summary_messages)
+            self.status_bar.showMessage("Deepfake analysis complete.")
+            QMessageBox.information(self, "Deepfake Analysis Results", report)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to run deepfake analysis: {e}")
+            self.status_bar.showMessage("Analysis failed.")
 
     def _create_bottom_toolbar(self):
         self.bottom_toolbar = QToolBar("Quick Tools", self)
