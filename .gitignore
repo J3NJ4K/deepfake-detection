@@ -231,3 +231,6 @@ venv/
 /test*.png
 
 faces_out.jpg
+
+# Models (DeepfakeBench / Xception)
+models/xception_best.pth
