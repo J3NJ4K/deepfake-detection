@@ -4,7 +4,6 @@ Machine Vision project for IKT213.
 
 A desktop photo-editing application that combines standard image processing tools with face detection and pretrained deepfake classification
 
-===
 
 ## Installation and Setup
 
@@ -16,7 +15,6 @@ Before starting, make sure to have the following installed:
 - Python 3
 - Git
 
-===
 
 ### 1. Clone the repository
 ```bash
@@ -113,7 +111,6 @@ The application window should open.
 3. Apply filters through the Filters menu.
 4. Run the face detection or deepfake analysis features on the opened image.
 
-===
 
 ## First Release Features
 
