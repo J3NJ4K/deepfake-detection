@@ -1,25 +1,32 @@
-# Deepfake-detection
-Deepfake detection project for IKT213 - Machine vision
+# Deepfake Detector Photo Editor
 
-a photo editor integrating deepfake detection models and image analysis tools.
+Machine Vision project for IKT213.
 
-I tried to make it as clean and organized as possible, lmk if you guys wanna change stuff
+A desktop photo-editing application that combines standard image processing tools with face detection and pretrained deepfake classification
 
-actually i just realized maybe you guys know how to do all of this but i personnaly dont O_O
+===
 
-## Quickstart and setup
-each team member have to setup their isolated local environment using the following steps:
+## Installation and Setup
+
+## Requirements
+
+
+Before starting, make sure to have the following installed:
+
+- Python 3
+- Git
+
+===
 
 ### 1. Clone the repository
 ```bash
 git clone https://github.com/J3NJ4K/deepfake-detection.git
 cd deepfake-detection
+git checkout first-release
 ```
-### 2. Create and activate the repository
-so that we use the same library and stuff, and that it works the same for everybody
 
-i think you have to do this where you saved the repository on your pc, like the path or whatever
-- windows
+### 2. Create and activate a virtual environment
+
 ```bash
 python -m venv venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -31,53 +38,94 @@ python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 3. Install project dependecies
-idk if it has everything we need but we can still add them further on
+### 3. Install project dependencies
+
+In active virtual environment run:
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
-### AI models & heavy weights
-large binary weight files are excluded from git via .gitignore to prevent repository bloat
-- where to store weights:
-all downloaded model weights must be placed locally inside the models/ directory
+The required libraries installed include PySide6, OpenCV, NumPy, and PyTorch.
 
-**Download links:**
+### 4. Download pretrained model files
 
-### Face detection (YuNet)
+Large binary weight files are excluded from git via .gitignore to prevent repository bloat
 
-Download into `models/`:
+First, Make sure models/ directory exists.
 
-    Invoke-WebRequest -Uri "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx" -OutFile "models/face_detection_yunet_2023mar.onnx"
+#### Windows PowerShell
 
-(macOS/Linux: `curl -L -o models/face_detection_yunet_2023mar.onnx <same url>`)
-
-### Deepfake classifier (Xception, DeepfakeBench)
-
-Download `xception_best.pth` from https://github.com/SCLBD/DeepfakeBench/releases/tag/v1.0.1 into `models/`.
-
-### Project architecture
-the codebase uses a modular layoutu to support parallel development without merge conflicts:
-- core/ : image processing
-- ui/ : pyside graphical user interface
-- detection/ : ai pipeline
-- models/ : local directory for model wiehgt files (ignoed by git)
-- main.py : main entry point to launch the app
-
-### Git workflow
-1. dont commit directly to main
-2. create dedicated feature branch for each task : 
-
-we'll figure this out together ig
-```bash
-git checkout main
-git pull origin main
-git checkout -b feature/your-feature-name
+```powershell
+New-Item -ItemType Directory -Force models
 ```
 
-3. commit and push your branch:
+#### macOS / Linux
+
 ```bash
-git add .
-git commit -m "feat : description of your changes"
-git push -u origin feature/your-feature-name
+mkdir -p models
 ```
-4. code review : open a pull request on github, at least one of us must review and approve the changes before merging into main.
+
+The following two files must be placed inside 'models/':
+
+- 'face_detection_yunet_20203mar.ohnx'
+- 'xception_best.pth'
+
+#### YuNet face detector
+
+On Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -Uri "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx" -OutFile "models/face_detection_yunet_2023mar.onnx"
+```
+
+On MacOS / Linux:
+```bash
+curl -L -o models/face_detection_yunet_2023mar.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+```
+
+#### Xception deepfake classifier
+
+Download 'xception_best.pth' from DeepfakeBench v1.0.1 release:
+
+https://github.com/SCLBD/DeepfakeBench/releases/tag/v1.0.1 
+
+placed into `models/`.
+
+```text
+models/xception_best.pth
+```
+
+## Running the Application
+
+Make sure the virtual environment is activated and the required model files are inside `models/`.
+
+Run the app from the repository root:
+
+```bash
+python main.py
+```
+
+The application window should open.
+
+## Basic Usage
+
+1. Open an image using `File -> Open`.
+2. Use the available image-editing tools.
+3. Apply filters through the Filters menu.
+4. Run the face detection or deepfake analysis features on the opened image.
+
+===
+
+## First Release Features
+
+The first prototype release includes:
+
+- Desktop photo editor interface
+- Image loading and display
+- Basic image transformations
+- Gaussian Blur
+- Sobel Edge Detection
+- Binary Thresholding
+- Histogram / Otsu Thresholding
+- YuNet face detection
+- Pretrained Xception deepfake classification
+- Bounding boxes on faces and classification probabilities
