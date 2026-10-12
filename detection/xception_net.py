@@ -8,6 +8,8 @@ import torch.nn.functional as F
 
 
 class SeparableConv2d(nn.Module):
+    """Depthwise conv followed by a 1x1 pointwise conv (Xception's core building block)."""
+
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size, stride, padding,
@@ -19,6 +21,8 @@ class SeparableConv2d(nn.Module):
 
 
 class Block(nn.Module):
+    """Stack of separable convs with a residual (skip) connection."""
+
     def __init__(self, in_filters, out_filters, reps, strides=1, start_with_relu=True, grow_first=True):
         super().__init__()
         if out_filters != in_filters or strides != 1:
@@ -55,6 +59,9 @@ class Block(nn.Module):
 class Xception(nn.Module):
     def __init__(self, num_classes=2):
         super().__init__()
+
+        # layer names has to match the checkpoint keys exactly, or loading fails
+        # entry flow: reduce the image size and increase the number of channels
         self.conv1 = nn.Conv2d(3, 32, 3, 2, 0, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.relu = nn.ReLU(inplace=True)
@@ -64,8 +71,10 @@ class Xception(nn.Module):
         self.block1 = Block(64, 128, 2, 2, start_with_relu=False)
         self.block2 = Block(128, 256, 2, 2)
         self.block3 = Block(256, 728, 2, 2)
+        # middle flow: 8 identical blocks that refine the features
         for i in range(4, 12):
             setattr(self, f"block{i}", Block(728, 728, 3, 1))
+        # exit flow: final features and the classifier (real vs. manipulated)
         self.block12 = Block(728, 1024, 2, 2, grow_first=False)
 
         self.conv3 = SeparableConv2d(1024, 1536, 3, 1, 1)
@@ -80,6 +89,7 @@ class Xception(nn.Module):
         )
 
     def forward(self, x):
+        # run through all layers, then average each feature map into one value and classify
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.relu(self.bn2(self.conv2(x)))
         for i in range(1, 13):
