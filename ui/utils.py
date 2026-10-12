@@ -12,7 +12,7 @@ def load_icon(name: str) -> QIcon | None:
     for ext in (".svg", ".png"):
         path = os.path.join(assets_dir, f"{name}{ext}")
         if os.path.exists(path):
-            print(f"[OK] Icône trouvée : {path}")
+           # print(f"[OK] Icône trouvée : {path}")
             return QIcon(path)
     
     print(f"[ERREUR] Fichier introuvable pour '{name}' dans {assets_dir}")
