@@ -1,10 +1,26 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent
+from PySide6.QtCore import Qt, Signal, QPointF
+
+# Noms des outils (utilisés par la barre d'outils et par le canvas)
+TOOL_HAND = "hand"      # déplacer / faire défiler l'image (outil par défaut)
+TOOL_SELECT = "select"
+TOOL_CROP = "crop"
+TOOL_BRUSH = "brush"
+
 
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
     zoom_changed = Signal(int)
+
+    # Signaux souris pour les outils (tous sauf "hand").
+    # Ils envoient : le nom de l'outil actif, puis la position en PIXELS DE L'IMAGE
+    # (x = colonne, y = ligne), quel que soit le zoom.
+    # Exemple pour un futur outil crop :
+    #     canvas.tool_pressed.connect(lambda tool, pos: ...)
+    tool_pressed = Signal(str, QPointF)
+    tool_dragged = Signal(str, QPointF)
+    tool_released = Signal(str, QPointF)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,9 +40,59 @@ class ImageCanvas(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
+        self._tool = TOOL_HAND
+        self.set_tool(TOOL_HAND)
+
+    # ------------------------------------------------------------------
+    # Outils
+    # ------------------------------------------------------------------
+    @property
+    def tool(self) -> str:
+        return self._tool
+
+    def set_tool(self, tool: str) -> None:
+        """Change l'outil actif : "hand" fait défiler l'image, les autres envoient les signaux tool_*."""
+        self._tool = tool
+        if tool == TOOL_HAND:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.viewport().unsetCursor()
+        else:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+
+    def _image_pos(self, event: QMouseEvent) -> QPointF:
+        """Position de la souris convertie en coordonnées de l'image."""
+        return self.mapToScene(event.position().toPoint())
+
+    def _tool_active(self) -> bool:
+        return self._tool != TOOL_HAND and not self._pixmap_item.pixmap().isNull()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if self._tool_active() and event.button() == Qt.MouseButton.LeftButton:
+            self.tool_pressed.emit(self._tool, self._image_pos(event))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._tool_active() and event.buttons() & Qt.MouseButton.LeftButton:
+            self.tool_dragged.emit(self._tool, self._image_pos(event))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._tool_active() and event.button() == Qt.MouseButton.LeftButton:
+            self.tool_released.emit(self._tool, self._image_pos(event))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------------------------
+    # Affichage et zoom
+    # ------------------------------------------------------------------
     def set_pixmap(self, pixmap: QPixmap):
         """Met à jour l'image affichée."""
         self._pixmap_item.setPixmap(pixmap)
