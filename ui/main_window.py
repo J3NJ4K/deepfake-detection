@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import ImageCanvas
 from ui.zoom_control import ZoomControl
+from ui.history import ImageHistory
 from ui.utils import load_icon, numpy_to_qimage, read_image_unicode, write_image_unicode
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale
 from core.image_io import read_img, save_img
@@ -33,6 +34,9 @@ class MainWindow(QMainWindow):
         self.current_image: np.ndarray | None = None
         self.current_file_path: str | None = None
 
+        # Historique pour Undo / Redo (20 étapes max)
+        self.history = ImageHistory(max_steps=20)
+
         # Composant central (Canvas)
         self.canvas = ImageCanvas(self)
         self.setCentralWidget(self.canvas)
@@ -45,7 +49,9 @@ class MainWindow(QMainWindow):
         # Initialisation UI
         self._create_actions()
         self._create_menus()
+        self._create_top_toolbar()
         self._create_bottom_toolbar()
+        self._update_undo_redo_state()
 
     def _create_actions(self):
         # --- File Menu ---
@@ -64,6 +70,20 @@ class MainWindow(QMainWindow):
         self.quit_act = QAction("&Quit", self)
         self.quit_act.setShortcut(QKeySequence.StandardKey.Quit)
         self.quit_act.triggered.connect(self.close)
+
+        # --- Edit Menu (Undo / Redo) ---
+        icon_undo = load_icon("undo")
+        self.undo_act = QAction(icon_undo, "&Undo", self) if icon_undo else QAction("↶ &Undo", self)
+        self.undo_act.setShortcut(QKeySequence.StandardKey.Undo)  # Ctrl+Z
+        self.undo_act.setToolTip("Undo (Ctrl+Z)")
+        self.undo_act.triggered.connect(self.undo)
+
+        icon_redo = load_icon("redo")
+        self.redo_act = QAction(icon_redo, "&Redo", self) if icon_redo else QAction("↷ &Redo", self)
+        # Ctrl+Y (Windows) et Ctrl+Shift+Z (macOS / Linux / Photoshop)
+        self.redo_act.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self.redo_act.setToolTip("Redo (Ctrl+Y)")
+        self.redo_act.triggered.connect(self.redo)
 
         # --- Filters Menu ---
         self.filter_gaussian_act = QAction("&Gaussian Filter", self)
@@ -116,6 +136,10 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.quit_act)
 
+        edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction(self.undo_act)
+        edit_menu.addAction(self.redo_act)
+
         image_menu = menubar.addMenu("&Image")
         image_menu.addAction(self.rot_ccw_act)
         image_menu.addAction(self.rot_cw_act)
@@ -160,8 +184,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.current_image = gaussian_blur(self.current_image, kernel_size=5)
-            self._update_display()
+            self._set_image(gaussian_blur(self.current_image, kernel_size=5))
             self.statusBar().showMessage("Gaussian Blur appliqué", 3000)
         except Exception as e:
             self.statusBar().showMessage(f"Erreur flou: {e}", 3000)
@@ -172,8 +195,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.current_image = sobel_filter(self.current_image)
-            self._update_display()
+            self._set_image(sobel_filter(self.current_image))
             self.statusBar().showMessage("Filtre Sobel appliqué", 3000)
         except Exception as e:
             self.statusBar().showMessage(f"Erreur Sobel: {e}", 3000)
@@ -184,8 +206,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.current_image = binary_threshold(self.current_image, threshold=128)
-            self._update_display()
+            self._set_image(binary_threshold(self.current_image, threshold=128))
             self.statusBar().showMessage("Seuillage binaire appliqué", 3000)
         except Exception as e:
             self.statusBar().showMessage(f"Erreur seuillage: {e}", 3000)
@@ -196,8 +217,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.current_image = histogram_threshold(self.current_image)
-            self._update_display()
+            self._set_image(histogram_threshold(self.current_image))
             self.statusBar().showMessage("Seuillage Otsu appliqué", 3000)
         except Exception as e:
             self.statusBar().showMessage(f"Erreur Otsu: {e}", 3000)
@@ -219,8 +239,7 @@ class MainWindow(QMainWindow):
                 # Rectangle bleu (RGB: 0, 150, 255) avec épaisseur proportionnelle
                 cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 150, 255), 2)
 
-            self.current_image = annotated_image
-            self._update_display()
+            self._set_image(annotated_image)
             self.status_bar.showMessage(f"Detected {len(boxes)} face(s).")
             QMessageBox.information(self, "Face Detection", f"Successfully detected {len(boxes)} face(s).")
 
@@ -285,9 +304,8 @@ class MainWindow(QMainWindow):
                 verdict = "Manipulated (Fake)" if is_fake else "Authentic (Real)"
                 summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
 
-            # Mettre à jour l'image affichée
-            self.current_image = annotated_image
-            self._update_display()
+            # Mettre à jour l'image affichée (annulable avec Ctrl+Z)
+            self._set_image(annotated_image)
 
             report = "\n".join(summary_messages)
             self.status_bar.showMessage("Deepfake analysis complete.")
@@ -296,6 +314,57 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to run deepfake analysis: {e}")
             self.status_bar.showMessage("Analysis failed.")
+
+    def _create_top_toolbar(self):
+        """Barre d'outils du haut : actions globales (Undo / Redo...)."""
+        self.top_toolbar = QToolBar("Main Tools", self)
+        self.top_toolbar.setIconSize(QSize(20, 20))
+        self.top_toolbar.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
+
+        self.top_toolbar.addAction(self.undo_act)
+        self.top_toolbar.addAction(self.redo_act)
+
+    # ------------------------------------------------------------------
+    # Undo / Redo
+    # ------------------------------------------------------------------
+    def _set_image(self, new_image: np.ndarray) -> None:
+        """
+        Remplace l'image courante en sauvegardant l'ancienne dans l'historique.
+        Toute modification de l'image doit passer par ici pour être annulable.
+        """
+        if self.current_image is not None:
+            self.history.push(self.current_image)
+        self.current_image = new_image
+        self._update_display()
+        self._update_undo_redo_state()
+
+    def undo(self) -> None:
+        if self.current_image is None:
+            return
+        previous = self.history.undo(self.current_image)
+        if previous is None:
+            return
+        self.current_image = previous
+        self._update_display()
+        self._update_undo_redo_state()
+        self.status_bar.showMessage("Undo", 2000)
+
+    def redo(self) -> None:
+        if self.current_image is None:
+            return
+        following = self.history.redo(self.current_image)
+        if following is None:
+            return
+        self.current_image = following
+        self._update_display()
+        self._update_undo_redo_state()
+        self.status_bar.showMessage("Redo", 2000)
+
+    def _update_undo_redo_state(self) -> None:
+        """Grise les boutons Undo / Redo quand il n'y a rien à annuler / rétablir."""
+        self.undo_act.setEnabled(self.history.can_undo())
+        self.redo_act.setEnabled(self.history.can_redo())
 
     def _create_bottom_toolbar(self):
         self.bottom_toolbar = QToolBar("Quick Tools", self)
@@ -341,6 +410,9 @@ class MainWindow(QMainWindow):
         try:
             self.current_image = read_img(file_path)
             self.current_file_path = file_path
+            # Nouvelle image : on repart d'un historique vide
+            self.history.clear()
+            self._update_undo_redo_state()
             
             # Au lieu de self.canvas.display_image(self.current_image) :
             self._update_display()
@@ -384,11 +456,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "Open an image first.")
             return
         try:
-            self.current_image = operation(self.current_image, *args)
+            new_image = operation(self.current_image, *args)
         except ValueError as error:
             QMessageBox.warning(self, "Warning", str(error))
             return
-        self._update_display()
+        self._set_image(new_image)
 
     def resize_image(self):
             if self.current_image is None:
