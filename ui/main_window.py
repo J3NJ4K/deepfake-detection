@@ -427,7 +427,7 @@ class MainWindow(QMainWindow):
             return
 
         if self.current_file_path:
-            self._write_image_file(self.current_file_path)
+            self._write_image_to_file(self.current_file_path)
         else:
             self.save_image_as()
 
@@ -436,20 +436,35 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "No image to save.")
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(
+        file_path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Image As", "", "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;Bitmap (*.bmp)"
         )
-        if file_path:
-            self._write_image_file(file_path)
+        if not file_path:
+            return
+
+        # Si l'utilisateur n'a pas tapé d'extension, on prend celle du filtre choisi
+        if not os.path.splitext(file_path)[1]:
+            if "JPEG" in selected_filter:
+                file_path += ".jpg"
+            elif "Bitmap" in selected_filter:
+                file_path += ".bmp"
+            else:
+                file_path += ".png"
+
+        # On ne retient le nouveau chemin que si l'enregistrement a réussi
+        if self._write_image_to_file(file_path):
             self.current_file_path = file_path
 
-    def _write_image_to_file(self, path: str) -> None:
+    def _write_image_to_file(self, path: str) -> bool:
+        """Enregistre l'image courante. Renvoie True si ça a marché."""
         try:
-            # Utilise directement save_img qui gère la conversion vers BGR en interne
-            save_img(path, self.current_image)
+            # save_img(image, path) : l'image NumPy d'abord, le chemin ensuite
+            save_img(self.current_image, path)
             self.status_bar.showMessage(f"Saved: {os.path.basename(path)}")
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+            return False
 
     def _apply_edit(self, operation, *args):
         if self.current_image is None:
