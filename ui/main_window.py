@@ -102,7 +102,9 @@ class MainWindow(QMainWindow):
         # Pour activer un outil quand il sera prêt : enlever setEnabled(False)
         # et brancher canvas.tool_pressed / tool_dragged / tool_released.
         self.tool_group = QActionGroup(self)
-        self.tool_group.setExclusive(True)
+
+        # One tool at a time, pressing the active tool again deactivates it
+        self.tool_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
 
         self.hand_tool_act = self._add_tool("Hand", TOOL_HAND, "hand", "Hand: drag to scroll the image when zoomed in")
         self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select", "Select an area (coming soon)")
@@ -118,7 +120,7 @@ class MainWindow(QMainWindow):
 
         self.hand_tool_act.setChecked(True)
 
-        self.tool_group.triggered.connect(lambda act: self.canvas.set_tool(act.data()))
+        self.tool_group.triggered.connect(self._on_tool_clicked)
 
         # Crop Tool
         self._crop_start = None
@@ -166,6 +168,14 @@ class MainWindow(QMainWindow):
                                                  "Detect Faces")
         self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, "deepfake",
                                               "Run Deepfake Analysis")
+
+    def _on_tool_clicked(self, action):
+        """Switch to the clicked tool, or back to the Hand if the active tool was clicked again."""
+        if action.isChecked():
+            self.canvas.set_tool(action.data())
+        else:
+            self.hand_tool_act.setChecked(True)
+            self.canvas.set_tool(TOOL_HAND)
 
     def _add_tool(self, text: str, tool_name: str, icon_name: str, tooltip: str) -> QAction:
         """Crée une action d'outil "cochable" et l'ajoute au groupe exclusif."""
@@ -566,6 +576,10 @@ class MainWindow(QMainWindow):
         if tool in SHAPE_TOOLS and self._shape_start is not None:
             self._apply_edit(self._draw_current_shape, tool, pos)
             self._shape_start = None
+            return
+        if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
+            points, self._stroke_points = self._stroke_points, []
+            self._apply_edit(draw_brush_stroke, points, *self._stroke_style(tool))
             return
         if tool != TOOL_CROP or self._crop_start is None:
             return
