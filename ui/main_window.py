@@ -6,16 +6,18 @@ from PySide6.QtWidgets import (
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
     QColorDialog
 )
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette
 from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
-from ui.canvas import ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER
+from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
+                       TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
+                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
-from core.image_io import read_img, save_img
-from core.drawing import draw_brush_stroke
+from core.image_io import read_img, save_img, new_img, img_properties
+from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
 from core.filters import (
@@ -24,6 +26,9 @@ from core.filters import (
     histogram_threshold,
     sobel_filter,
 )
+
+SHAPE_TOOLS = (TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE,
+               TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -76,12 +81,15 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self):
         # --- File ---
+        self.new_act = self._make_action("&New...", self.new_image,
+                                         shortcut=QKeySequence.StandardKey.New)
         self.open_act = self._make_action("&Open...", self.open_image,
                                           shortcut=QKeySequence.StandardKey.Open)
         self.save_act = self._make_action("&Save", self.save_image,
                                           shortcut=QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as,
                                              shortcut=QKeySequence.StandardKey.SaveAs)
+        self.properties_act = self._make_action("&Properties...", self.show_properties)
         self.quit_act = self._make_action("&Quit", self.close,
                                           shortcut=QKeySequence.StandardKey.Quit)
 
@@ -96,28 +104,49 @@ class MainWindow(QMainWindow):
         # Pour activer un outil quand il sera prêt : enlever setEnabled(False)
         # et brancher canvas.tool_pressed / tool_dragged / tool_released.
         self.tool_group = QActionGroup(self)
-        self.tool_group.setExclusive(True)
+
+        # One tool at a time, pressing the active tool again deactivates it
+        self.tool_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
 
         self.hand_tool_act = self._add_tool("Hand", TOOL_HAND, "hand", "Hand: drag to scroll the image when zoomed in")
         self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select", "Select an area (coming soon)")
         self.crop_tool_act = self._add_tool("Crop", TOOL_CROP, "crop", "Crop: Drag a rectangle over the image")
         self.brush_tool_act = self._add_tool("Brush", TOOL_BRUSH, "brush", "Brush: drag to draw")
-        self.eraser_tool_act = self._add_tool("Eraser", TOOL_ERASER, "eraser", "Eraser: drag to erase")
+        self.eraser_tool_act = self._add_tool("Eraser", TOOL_ERASER, "eraser", "Eraser: drag to erase (change its size with Size button)")
+        self.picker_tool_act = self._add_tool("Pick color", TOOL_PICKER, "picker",
+                                              "Color picker: click the image to use that color for the brush")
+
+        self.rect_tool_act = self._add_tool("Rectangle", TOOL_RECT, "rectangle", "Rectangle: drag to draw")
+        self.ellipse_tool_act = self._add_tool("Ellipse", TOOL_ELLIPSE, "ellipse", "Ellipse: drag to draw")
+        self.line_tool_act = self._add_tool("Line", TOOL_LINE, "line", "Line: drag to draw")
+        self.triangle_tool_act = self._add_tool("Triangle", TOOL_TRIANGLE, "triangle", "Triangle: drag to draw")
+        self.right_triangle_tool_act = self._add_tool("Right triangle", TOOL_RIGHT_TRIANGLE, "right_triangle",
+                                                      "Right triangle: drag to draw")
+        self.diamond_tool_act = self._add_tool("Diamond", TOOL_DIAMOND, "diamond", "Diamond: drag to draw")
+        self.star_tool_act = self._add_tool("Star", TOOL_STAR, "star", "Star: drag to draw")
+        self.arrow_tool_act = self._add_tool("Arrow", TOOL_ARROW, "arrow", "Arrow: drag to draw")
+        self.fill_tool_act = self._add_tool("Fill", TOOL_FILL, "bucket",
+                                            "Fill: click inside a shape to fill it with the fill color")
 
         self.hand_tool_act.setChecked(True)
-        self.crop_tool_act.setToolTip("Crop: drag a rectangle over the image")
-        self.select_tool_act.setEnabled(False)
 
-        self.tool_group.triggered.connect(lambda act: self.canvas.set_tool(act.data()))
+        self.tool_group.triggered.connect(self._on_tool_clicked)
+
         # Crop Tool
         self._crop_start = None
         self._stroke_points = []
+        self._shape_start = None
         self.brush_color = (255, 0, 0) #red in the beginning
         self.brush_size = 5
-        self.color_act = self._make_action("Color", self.choose_brush_color, None, "Brush color")
+        self.color_act = self._make_action("Color", self.choose_brush_color, None,
+                                           "Color for the brush, lines and shape outlines")
         self.size_act = self._make_action(f"Size: {self.brush_size}", self.choose_brush_size, None,
-                                          "Brush and eraser size")
+                                          "Size of the brush, eraser, lines and shape outlines")
+        self.fill_color = (255, 255, 255)
+        self.fill_color_act = self._make_action("Fill color", self.choose_fill_color, None, "Fill color for shapes")
         self._update_color_icon()
+        self._update_size_icon()
+        self._update_fill_icon()
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
@@ -149,6 +178,14 @@ class MainWindow(QMainWindow):
         self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, "deepfake",
                                               "Run Deepfake Analysis")
 
+    def _on_tool_clicked(self, action):
+        """Switch to the clicked tool, or back to the Hand if the active tool was clicked again."""
+        if action.isChecked():
+            self.canvas.set_tool(action.data())
+        else:
+            self.hand_tool_act.setChecked(True)
+            self.canvas.set_tool(TOOL_HAND)
+
     def _add_tool(self, text: str, tool_name: str, icon_name: str, tooltip: str) -> QAction:
         """Crée une action d'outil "cochable" et l'ajoute au groupe exclusif."""
         action = self._make_action(text, None, icon_name, tooltip)
@@ -162,10 +199,13 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("&File")
+        file_menu.addAction(self.new_act)
         file_menu.addAction(self.open_act)
         file_menu.addSeparator()
         file_menu.addAction(self.save_act)
         file_menu.addAction(self.save_as_act)
+        file_menu.addSeparator()
+        file_menu.addAction(self.properties_act)
         file_menu.addSeparator()
         file_menu.addAction(self.quit_act)
 
@@ -321,11 +361,19 @@ class MainWindow(QMainWindow):
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
                                  self.crop_tool_act, self.brush_tool_act,
-                                 self.eraser_tool_act])
+                                 self.eraser_tool_act, self.picker_tool_act])
 
-        brush = self.ribbon.add_group("Brush")
-        brush.add_large_button(self.color_act)
-        brush.add_large_button(self.size_act)
+        pen = self.ribbon.add_group("Pen")
+        pen.add_large_button(self.color_act)
+        pen.add_large_button(self.size_act)
+
+        shapes = self.ribbon.add_group("Shapes")
+        shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
+                                  self.line_tool_act, self.triangle_tool_act,
+                                  self.right_triangle_tool_act, self.diamond_tool_act,
+                                  self.star_tool_act, self.arrow_tool_act])
+        shapes.add_large_button(self.fill_tool_act)
+        shapes.add_large_button(self.fill_color_act)
 
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
@@ -414,6 +462,31 @@ class MainWindow(QMainWindow):
             h, w, _ = self.current_image.shape
             self.status_bar.showMessage(f"Image: {w}x{h} px | Format: RGB uint8")
 
+    def new_image(self) -> None:
+        width, ok = QInputDialog.getInt(self, "New image", "Width (px):", 800, 1, 10000)
+        if not ok:
+            return
+        height, ok = QInputDialog.getInt(self, "New image", "Height (px):", 600, 1, 10000)
+        if not ok:
+            return
+
+        self.current_image = new_img(width, height)
+        self.current_file_path = None  # not saved yet -> Save will ask for a file name
+        self.history.clear()
+        self._update_undo_redo_state()
+        self._update_display()
+        self.status_bar.showMessage(f"New image: {width}x{height} px")
+
+    def show_properties(self) -> None:
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Open an image first.")
+            return
+        props = img_properties(self.current_image, self.current_file_path)
+        if self.current_file_path is None:
+            props["File"] = "Not saved yet"
+        text = "\n".join(f"{key}: {value}" for key, value in props.items())
+        QMessageBox.information(self, "Image Properties", text)
+
     def open_image(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
@@ -492,20 +565,32 @@ class MainWindow(QMainWindow):
         self._set_image(new_image)
 
     def _on_tool_pressed(self, tool, pos):
-        if tool == TOOL_CROP:
+        if tool in SHAPE_TOOLS:
+            self._shape_start = pos
+        elif tool == TOOL_CROP:
             self._crop_start = pos
         elif tool in (TOOL_BRUSH, TOOL_ERASER):
             self._stroke_points = [(pos.x(), pos.y())]
             self._preview_stroke(tool)
+        elif tool == TOOL_PICKER:
+            self._pick_color(pos)
+        elif tool == TOOL_FILL:
+            self._fill_at(pos)
 
     def _on_tool_dragged(self, tool, pos):
-        if tool == TOOL_CROP and self._crop_start is not None:
+        if tool in SHAPE_TOOLS and self._shape_start is not None:
+            self._show_image(self._draw_current_shape(self.current_image, tool, pos))
+        elif tool == TOOL_CROP and self._crop_start is not None:
             self.canvas.show_selection(self._crop_start, pos)
         elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
             self._stroke_points.append((pos.x(), pos.y()))
             self._preview_stroke(tool)
 
     def _on_tool_released(self, tool, pos):
+        if tool in SHAPE_TOOLS and self._shape_start is not None:
+            self._apply_edit(self._draw_current_shape, tool, pos)
+            self._shape_start = None
+            return
         if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
             points, self._stroke_points = self._stroke_points, []
             self._apply_edit(draw_brush_stroke, points, *self._stroke_style(tool))
@@ -517,6 +602,41 @@ class MainWindow(QMainWindow):
         box = (start.x(), start.y(), pos.x(), pos.y())
         self._apply_edit(crop, box)
 
+    def _draw_current_shape(self, image, tool, end):
+        start = (self._shape_start.x(), self._shape_start.y())
+        return draw_shape(image, tool, start, (end.x(), end.y()),
+                          self.brush_color, self.brush_size)
+
+    def _show_image(self, image):
+        self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(image)))
+
+    def _update_fill_icon(self):
+        swatch = QPixmap(32, 32)
+        swatch.fill(QColor(*self.fill_color))
+        self.fill_color_act.setIcon(QIcon(swatch))
+
+    def choose_fill_color(self):
+        color = QColorDialog.getColor(QColor(*self.fill_color), self, "Fill color")
+        if color.isValid():
+            self.fill_color = (color.red(), color.green(), color.blue())
+            self._update_fill_icon()
+
+    def _fill_at(self, pos):
+            x, y = int(pos.x()), int(pos.y())
+            height, width = self.current_image.shape[:2]
+            if 0 <= x < width and 0 <= y < height:  # ignore clicks outside the image
+                self._apply_edit(flood_fill, x, y, self.fill_color, 60)
+
+    def _pick_color(self, pos):
+        try:
+            color = get_pixel_color(self.current_image, pos.x(), pos.y())
+        except ValueError:
+            return  # clicked outside the image: do nothing
+        self.brush_color = color
+        self._update_color_icon()
+        self.status_bar.showMessage(f"Picked color RGB{color}", 3000)
+        self.brush_tool_act.trigger()
+
     def _stroke_style(self, tool):
         if tool == TOOL_ERASER:
             return (255, 255, 255), self.brush_size
@@ -527,17 +647,30 @@ class MainWindow(QMainWindow):
         swatch.fill(QColor(*self.brush_color))
         self.color_act.setIcon(QIcon(swatch))
 
+    def _update_size_icon(self):
+        icon = QPixmap(32, 32)
+        icon.fill(Qt.GlobalColor.transparent)
+        diameter = max(3, min(self.brush_size, 30))
+        painter = QPainter(icon)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.palette().color(QPalette.ColorRole.WindowText))
+        painter.drawEllipse((32 - diameter) / 2, (32 - diameter) / 2, diameter, diameter)
+        painter.end()
+        self.size_act.setIcon(QIcon(icon))
+
     def choose_brush_color(self):
-        color = QColorDialog.getColor(QColor(*self.brush_color), self, "Brush color")
+        color = QColorDialog.getColor(QColor(*self.brush_color), self, "Color")
         if color.isValid():  # False if the user pressed Cancel
             self.brush_color = (color.red(), color.green(), color.blue())
             self._update_color_icon()
 
     def choose_brush_size(self):
-        size, ok = QInputDialog.getInt(self, "Brush size", "Size (px):", self.brush_size, 1, 200)
+        size, ok = QInputDialog.getInt(self, "Size", "Size (px):", self.brush_size, 1, 200)
         if ok:
             self.brush_size = size
             self.size_act.setText(f"Size: {size}")
+            self._update_size_icon()
             self.canvas.set_brush_size(size)
 
     def _preview_stroke(self, tool):

@@ -8,7 +8,16 @@ TOOL_SELECT = "select"
 TOOL_CROP = "crop"
 TOOL_BRUSH = "brush"
 TOOL_ERASER = "eraser"
-
+TOOL_PICKER = "picker"
+TOOL_RECT = "rectangle"
+TOOL_ELLIPSE = "ellipse"
+TOOL_LINE = "line"
+TOOL_FILL = "fill"
+TOOL_TRIANGLE = "triangle"
+TOOL_RIGHT_TRIANGLE = "right_triangle"
+TOOL_DIAMOND = "diamond"
+TOOL_STAR = "star"
+TOOL_ARROW = "arrow"
 
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
