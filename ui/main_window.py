@@ -10,13 +10,14 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, 
 from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
-                       TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE)
+                       TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
+                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
 from core.image_io import read_img, save_img, new_img, img_properties
-from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape
+from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
 from core.filters import (
@@ -26,7 +27,8 @@ from core.filters import (
     sobel_filter,
 )
 
-SHAPE_TOOLS = (TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE)
+SHAPE_TOOLS = (TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE,
+               TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -117,6 +119,14 @@ class MainWindow(QMainWindow):
         self.rect_tool_act = self._add_tool("Rectangle", TOOL_RECT, "rectangle", "Rectangle: drag to draw")
         self.ellipse_tool_act = self._add_tool("Ellipse", TOOL_ELLIPSE, "ellipse", "Ellipse: drag to draw")
         self.line_tool_act = self._add_tool("Line", TOOL_LINE, "line", "Line: drag to draw")
+        self.triangle_tool_act = self._add_tool("Triangle", TOOL_TRIANGLE, "triangle", "Triangle: drag to draw")
+        self.right_triangle_tool_act = self._add_tool("Right triangle", TOOL_RIGHT_TRIANGLE, "right_triangle",
+                                                      "Right triangle: drag to draw")
+        self.diamond_tool_act = self._add_tool("Diamond", TOOL_DIAMOND, "diamond", "Diamond: drag to draw")
+        self.star_tool_act = self._add_tool("Star", TOOL_STAR, "star", "Star: drag to draw")
+        self.arrow_tool_act = self._add_tool("Arrow", TOOL_ARROW, "arrow", "Arrow: drag to draw")
+        self.fill_tool_act = self._add_tool("Fill", TOOL_FILL, "bucket",
+                                            "Fill: click inside a shape to fill it with the fill color")
 
         self.hand_tool_act.setChecked(True)
 
@@ -128,12 +138,11 @@ class MainWindow(QMainWindow):
         self._shape_start = None
         self.brush_color = (255, 0, 0) #red in the beginning
         self.brush_size = 5
-        self.color_act = self._make_action("Color", self.choose_brush_color, None, "Brush color")
+        self.color_act = self._make_action("Color", self.choose_brush_color, None,
+                                           "Color for the brush, lines and shape outlines")
         self.size_act = self._make_action(f"Size: {self.brush_size}", self.choose_brush_size, None,
-                                          "Size of the brush and the eraser")
+                                          "Size of the brush, eraser, lines and shape outlines")
         self.fill_color = (255, 255, 255)
-        self.fill_act = self._make_action("Fill", self._on_fill_toggled, "bucket", "Fill shapes (on/off)")
-        self.fill_act.setCheckable(True)
         self.fill_color_act = self._make_action("Fill color", self.choose_fill_color, None, "Fill color for shapes")
         self._update_color_icon()
         self._update_size_icon()
@@ -354,13 +363,16 @@ class MainWindow(QMainWindow):
                                  self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act, self.picker_tool_act])
 
-        brush = self.ribbon.add_group("Brush & Eraser")
-        brush.add_large_button(self.color_act)
-        brush.add_large_button(self.size_act)
+        pen = self.ribbon.add_group("Pen")
+        pen.add_large_button(self.color_act)
+        pen.add_large_button(self.size_act)
 
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
-                                  self.line_tool_act, self.fill_act])
+                                  self.line_tool_act, self.triangle_tool_act,
+                                  self.right_triangle_tool_act, self.diamond_tool_act,
+                                  self.star_tool_act, self.arrow_tool_act])
+        shapes.add_large_button(self.fill_tool_act)
         shapes.add_large_button(self.fill_color_act)
 
         image = self.ribbon.add_group("Image")
@@ -562,6 +574,8 @@ class MainWindow(QMainWindow):
             self._preview_stroke(tool)
         elif tool == TOOL_PICKER:
             self._pick_color(pos)
+        elif tool == TOOL_FILL:
+            self._fill_at(pos)
 
     def _on_tool_dragged(self, tool, pos):
         if tool in SHAPE_TOOLS and self._shape_start is not None:
@@ -590,9 +604,8 @@ class MainWindow(QMainWindow):
 
     def _draw_current_shape(self, image, tool, end):
         start = (self._shape_start.x(), self._shape_start.y())
-        fill = self.fill_color if self.fill_act.isChecked() else None
         return draw_shape(image, tool, start, (end.x(), end.y()),
-                          self.brush_color, self.brush_size, fill)
+                          self.brush_color, self.brush_size)
 
     def _show_image(self, image):
         self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(image)))
@@ -607,11 +620,12 @@ class MainWindow(QMainWindow):
         if color.isValid():
             self.fill_color = (color.red(), color.green(), color.blue())
             self._update_fill_icon()
-            self.fill_act.setChecked(True)  # choosing a fill color turns fill on
 
-    def _on_fill_toggled(self):
-        state = "on" if self.fill_act.isChecked() else "off"
-        self.status_bar.showMessage(f"Shape fill {state}", 2000)
+    def _fill_at(self, pos):
+            x, y = int(pos.x()), int(pos.y())
+            height, width = self.current_image.shape[:2]
+            if 0 <= x < width and 0 <= y < height:  # ignore clicks outside the image
+                self._apply_edit(flood_fill, x, y, self.fill_color, 60)
 
     def _pick_color(self, pos):
         try:
@@ -646,13 +660,13 @@ class MainWindow(QMainWindow):
         self.size_act.setIcon(QIcon(icon))
 
     def choose_brush_color(self):
-        color = QColorDialog.getColor(QColor(*self.brush_color), self, "Brush color")
+        color = QColorDialog.getColor(QColor(*self.brush_color), self, "Color")
         if color.isValid():  # False if the user pressed Cancel
             self.brush_color = (color.red(), color.green(), color.blue())
             self._update_color_icon()
 
     def choose_brush_size(self):
-        size, ok = QInputDialog.getInt(self, "Brush size", "Size (px):", self.brush_size, 1, 200)
+        size, ok = QInputDialog.getInt(self, "Size", "Size (px):", self.brush_size, 1, 200)
         if ok:
             self.brush_size = size
             self.size_act.setText(f"Size: {size}")
