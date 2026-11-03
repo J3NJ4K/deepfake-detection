@@ -7,6 +7,7 @@ TOOL_HAND = "hand"      # déplacer / faire défiler l'image (outil par défaut)
 TOOL_SELECT = "select"
 TOOL_CROP = "crop"
 TOOL_BRUSH = "brush"
+TOOL_ERASER = "eraser"
 
 
 class ImageCanvas(QGraphicsView):
@@ -107,6 +108,9 @@ class ImageCanvas(QGraphicsView):
         rect = rect.intersected(self._pixmap_item.boundingRect())  # keep it inside the image
         self._selection_item.setRect(rect)
         self._selection_item.show()
+
+    def show_preview(self, pixmap: QPixmap) -> None:
+        self._pixmap_item.setPixmap(pixmap)
 
     def clear_selection(self) -> None:
         self._selection_item.hide()
