@@ -3,9 +3,10 @@ import os
 import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
-    QFileDialog, QWidget, QSizePolicy, QInputDialog
+    QFileDialog, QWidget, QSizePolicy, QInputDialog,
+    QColorDialog
 )
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon
 from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER
@@ -111,6 +112,12 @@ class MainWindow(QMainWindow):
         # Crop Tool
         self._crop_start = None
         self._stroke_points = []
+        self.brush_color = (255, 0, 0) #red in the beginning
+        self.brush_size = 5
+        self.color_act = self._make_action("Color", self.choose_brush_color, None, "Brush color")
+        self.size_act = self._make_action(f"Size: {self.brush_size}", self.choose_brush_size, None,
+                                          "Brush and eraser size")
+        self._update_color_icon()
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
@@ -316,6 +323,10 @@ class MainWindow(QMainWindow):
                                  self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act])
 
+        brush = self.ribbon.add_group("Brush")
+        brush.add_large_button(self.color_act)
+        brush.add_large_button(self.size_act)
+
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
                                  self.flip_h_act, self.flip_v_act])
@@ -506,11 +517,28 @@ class MainWindow(QMainWindow):
         box = (start.x(), start.y(), pos.x(), pos.y())
         self._apply_edit(crop, box)
 
-
     def _stroke_style(self, tool):
         if tool == TOOL_ERASER:
-            return (255, 255, 255), 20  # white, wider
-        return (255, 0, 0), 5           # red
+            return (255, 255, 255), self.brush_size
+        return self.brush_color, self.brush_size
+
+    def _update_color_icon(self):
+        swatch = QPixmap(32, 32)
+        swatch.fill(QColor(*self.brush_color))
+        self.color_act.setIcon(QIcon(swatch))
+
+    def choose_brush_color(self):
+        color = QColorDialog.getColor(QColor(*self.brush_color), self, "Brush color")
+        if color.isValid():  # False if the user pressed Cancel
+            self.brush_color = (color.red(), color.green(), color.blue())
+            self._update_color_icon()
+
+    def choose_brush_size(self):
+        size, ok = QInputDialog.getInt(self, "Brush size", "Size (px):", self.brush_size, 1, 200)
+        if ok:
+            self.brush_size = size
+            self.size_act.setText(f"Size: {size}")
+            self.canvas.set_brush_size(size)
 
     def _preview_stroke(self, tool):
         if self.current_image is None:

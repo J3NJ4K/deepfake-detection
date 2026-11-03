@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor
+from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 
 # Noms des outils (utilisés par la barre d'outils et par le canvas)
@@ -54,6 +54,9 @@ class ImageCanvas(QGraphicsView):
         self._selection_item.hide()
         self._scene.addItem(self._selection_item)
 
+        self._brush_size = 5
+        self.zoom_changed.connect(lambda _: self._update_cursor())
+
         self._tool = TOOL_HAND
         self.set_tool(TOOL_HAND)
 
@@ -69,10 +72,37 @@ class ImageCanvas(QGraphicsView):
         self._tool = tool
         if tool == TOOL_HAND:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self.viewport().unsetCursor()
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self._update_cursor()
+
+    def set_brush_size(self, size: int) -> None:
+        self._brush_size = size
+        self._update_cursor()
+
+    def _update_cursor(self) -> None:
+        if self._tool == TOOL_HAND:
+            self.viewport().unsetCursor()
+        elif self._tool == TOOL_ERASER:
+            self.viewport().setCursor(self._eraser_cursor())
+        else:
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+
+    def _eraser_cursor(self) -> QCursor:
+        diameter = int(round(self._brush_size * self._current_zoom))
+        diameter = max(8, min(diameter, 250))
+        pixmap = QPixmap(diameter + 2, diameter + 2)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(60, 60, 60), 1))
+        painter.setBrush(QColor(255, 255, 255, 160))
+        painter.drawEllipse(1, 1, diameter, diameter)
+        painter.end()
+
+        center = pixmap.width() // 2
+        return QCursor(pixmap, center, center)
 
     def _image_pos(self, event: QMouseEvent) -> QPointF:
         """Position de la souris convertie en coordonnées de l'image."""
