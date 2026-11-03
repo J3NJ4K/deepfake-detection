@@ -8,12 +8,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap
 from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
-from ui.canvas import ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH
+from ui.canvas import ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
 from core.image_io import read_img, save_img
+from core.drawing import draw_brush_stroke
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
 from core.filters import (
@@ -99,16 +100,17 @@ class MainWindow(QMainWindow):
         self.hand_tool_act = self._add_tool("Hand", TOOL_HAND, "hand", "Hand: drag to scroll the image when zoomed in")
         self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select", "Select an area (coming soon)")
         self.crop_tool_act = self._add_tool("Crop", TOOL_CROP, "crop", "Crop: Drag a rectangle over the image")
-        self.brush_tool_act = self._add_tool("Brush", TOOL_BRUSH, "brush", "Draw on the image (coming soon)")
+        self.brush_tool_act = self._add_tool("Brush", TOOL_BRUSH, "brush", "Brush: drag to draw")
+        self.eraser_tool_act = self._add_tool("Eraser", TOOL_ERASER, "eraser", "Eraser: drag to erase")
 
         self.hand_tool_act.setChecked(True)
         self.crop_tool_act.setToolTip("Crop: drag a rectangle over the image")
-        for placeholder in (self.select_tool_act, self.brush_tool_act):
-            placeholder.setEnabled(False)
+        self.select_tool_act.setEnabled(False)
 
         self.tool_group.triggered.connect(lambda act: self.canvas.set_tool(act.data()))
         # Crop Tool
         self._crop_start = None
+        self._stroke_points = []
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
@@ -311,7 +313,8 @@ class MainWindow(QMainWindow):
 
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
-                                 self.crop_tool_act, self.brush_tool_act])
+                                 self.crop_tool_act, self.brush_tool_act,
+                                 self.eraser_tool_act])
 
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
@@ -480,18 +483,40 @@ class MainWindow(QMainWindow):
     def _on_tool_pressed(self, tool, pos):
         if tool == TOOL_CROP:
             self._crop_start = pos
+        elif tool in (TOOL_BRUSH, TOOL_ERASER):
+            self._stroke_points = [(pos.x(), pos.y())]
+            self._preview_stroke(tool)
 
     def _on_tool_dragged(self, tool, pos):
         if tool == TOOL_CROP and self._crop_start is not None:
             self.canvas.show_selection(self._crop_start, pos)
+        elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
+            self._stroke_points.append((pos.x(), pos.y()))
+            self._preview_stroke(tool)
 
     def _on_tool_released(self, tool, pos):
+        if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
+            points, self._stroke_points = self._stroke_points, []
+            self._apply_edit(draw_brush_stroke, points, *self._stroke_style(tool))
+            return
         if tool != TOOL_CROP or self._crop_start is None:
             return
         start, self._crop_start = self._crop_start, None
         self.canvas.clear_selection()
         box = (start.x(), start.y(), pos.x(), pos.y())
         self._apply_edit(crop, box)
+
+
+    def _stroke_style(self, tool):
+        if tool == TOOL_ERASER:
+            return (255, 255, 255), 20  # white, wider
+        return (255, 0, 0), 5           # red
+
+    def _preview_stroke(self, tool):
+        if self.current_image is None:
+            return
+        preview = draw_brush_stroke(self.current_image, self._stroke_points, *self._stroke_style(tool))
+        self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(preview)))
 
 
     def resize_image(self):
