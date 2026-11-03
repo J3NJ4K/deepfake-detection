@@ -19,3 +19,13 @@ def draw_brush_stroke(image, points, color=(255, 0, 0), size=5):
         for p1, p2 in zip(pts, pts[1:]):
             cv2.line(result, p1, p2, color, size, lineType=cv2.LINE_AA)
     return result
+
+
+def get_pixel_color(image, x, y):
+    check_img(image)
+    x, y = int(x), int(y)
+    height, width = image.shape[:2]
+    if not (0 <= x < width and 0 <= y < height):
+        raise ValueError(f"Point ({x}, {y}) is outside the {width}x{height} image")
+    r, g, b = image[y, x]
+    return int(r), int(g), int(b)
