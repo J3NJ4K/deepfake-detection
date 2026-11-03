@@ -13,7 +13,6 @@ TOOL_RECT = "rectangle"
 TOOL_ELLIPSE = "ellipse"
 TOOL_LINE = "line"
 
-
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
     zoom_changed = Signal(int)
