@@ -29,3 +29,34 @@ def get_pixel_color(image, x, y):
         raise ValueError(f"Point ({x}, {y}) is outside the {width}x{height} image")
     r, g, b = image[y, x]
     return int(r), int(g), int(b)
+
+
+SHAPES = ("rectangle", "ellipse", "line")
+
+
+def draw_shape(image, shape, start, end, outline_color=(255, 0, 0), thickness=3, fill_color=None):
+    check_img(image)
+    if shape not in SHAPES:
+        raise ValueError(f"Invalid shape '{shape}'. Choose from {SHAPES}")
+    if thickness <= 0:
+        raise ValueError(f"Invalid thickness: {thickness}. Must be positive.")
+
+    result = image.copy()
+    x1, y1 = int(round(start[0])), int(round(start[1]))
+    x2, y2 = int(round(end[0])), int(round(end[1]))
+
+    if shape == "line":
+        cv2.line(result, (x1, y1), (x2, y2), outline_color, thickness, lineType=cv2.LINE_AA)
+        return result
+
+    if shape == "rectangle":
+        if fill_color is not None:
+            cv2.rectangle(result, (x1, y1), (x2, y2), fill_color, -1)
+        cv2.rectangle(result, (x1, y1), (x2, y2), outline_color, thickness, lineType=cv2.LINE_AA)
+    else:  # ellipse that fits inside the dragged box
+        center = ((x1 + x2) // 2, (y1 + y2) // 2)
+        axes = (abs(x2 - x1) // 2, abs(y2 - y1) // 2)
+        if fill_color is not None:
+            cv2.ellipse(result, center, axes, 0, 0, 360, fill_color, -1, lineType=cv2.LINE_AA)
+        cv2.ellipse(result, center, axes, 0, 0, 360, outline_color, thickness, lineType=cv2.LINE_AA)
+    return result
