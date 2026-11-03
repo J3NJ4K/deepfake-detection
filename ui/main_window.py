@@ -12,7 +12,7 @@ from ui.canvas import ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
-from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale
+from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
 from core.image_io import read_img, save_img
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
@@ -98,14 +98,20 @@ class MainWindow(QMainWindow):
 
         self.hand_tool_act = self._add_tool("Hand", TOOL_HAND, "hand", "Hand: drag to scroll the image when zoomed in")
         self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select", "Select an area (coming soon)")
-        self.crop_tool_act = self._add_tool("Crop", TOOL_CROP, "crop", "Crop the image (coming soon)")
+        self.crop_tool_act = self._add_tool("Crop", TOOL_CROP, "crop", "Crop: Drag a rectangle over the image")
         self.brush_tool_act = self._add_tool("Brush", TOOL_BRUSH, "brush", "Draw on the image (coming soon)")
 
         self.hand_tool_act.setChecked(True)
-        for placeholder in (self.select_tool_act, self.crop_tool_act, self.brush_tool_act):
+        self.crop_tool_act.setToolTip("Crop: drag a rectangle over the image")
+        for placeholder in (self.select_tool_act, self.brush_tool_act):
             placeholder.setEnabled(False)
 
         self.tool_group.triggered.connect(lambda act: self.canvas.set_tool(act.data()))
+        # Crop Tool
+        self._crop_start = None
+        self.canvas.tool_pressed.connect(self._on_tool_pressed)
+        self.canvas.tool_dragged.connect(self._on_tool_dragged)
+        self.canvas.tool_released.connect(self._on_tool_released)
 
         # --- Image ---
         self.rot_ccw_act = self._make_action("Rotate Left", lambda: self._apply_edit(rotate_left),
@@ -470,6 +476,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", str(error))
             return
         self._set_image(new_image)
+
+    def _on_tool_pressed(self, tool, pos):
+        if tool == TOOL_CROP:
+            self._crop_start = pos
+
+    def _on_tool_dragged(self, tool, pos):
+        if tool == TOOL_CROP and self._crop_start is not None:
+            self.canvas.show_selection(self._crop_start, pos)
+
+    def _on_tool_released(self, tool, pos):
+        if tool != TOOL_CROP or self._crop_start is None:
+            return
+        start, self._crop_start = self._crop_start, None
+        self.canvas.clear_selection()
+        box = (start.x(), start.y(), pos.x(), pos.y())
+        self._apply_edit(crop, box)
+
 
     def resize_image(self):
             if self.current_image is None:
