@@ -14,7 +14,7 @@ from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
-from core.image_io import read_img, save_img
+from core.image_io import read_img, save_img, new_img, img_properties
 from core.drawing import draw_brush_stroke, get_pixel_color
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
@@ -76,12 +76,15 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self):
         # --- File ---
+        self.new_act = self._make_action("&New...", self.new_image,
+                                         shortcut=QKeySequence.StandardKey.New)
         self.open_act = self._make_action("&Open...", self.open_image,
                                           shortcut=QKeySequence.StandardKey.Open)
         self.save_act = self._make_action("&Save", self.save_image,
                                           shortcut=QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as,
                                              shortcut=QKeySequence.StandardKey.SaveAs)
+        self.properties_act = self._make_action("&Properties...", self.show_properties)
         self.quit_act = self._make_action("&Quit", self.close,
                                           shortcut=QKeySequence.StandardKey.Quit)
 
@@ -165,10 +168,13 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("&File")
+        file_menu.addAction(self.new_act)
         file_menu.addAction(self.open_act)
         file_menu.addSeparator()
         file_menu.addAction(self.save_act)
         file_menu.addAction(self.save_as_act)
+        file_menu.addSeparator()
+        file_menu.addAction(self.properties_act)
         file_menu.addSeparator()
         file_menu.addAction(self.quit_act)
 
@@ -416,6 +422,31 @@ class MainWindow(QMainWindow):
             self.zoom_control.setEnabled(True)
             h, w, _ = self.current_image.shape
             self.status_bar.showMessage(f"Image: {w}x{h} px | Format: RGB uint8")
+
+    def new_image(self) -> None:
+        width, ok = QInputDialog.getInt(self, "New image", "Width (px):", 800, 1, 10000)
+        if not ok:
+            return
+        height, ok = QInputDialog.getInt(self, "New image", "Height (px):", 600, 1, 10000)
+        if not ok:
+            return
+
+        self.current_image = new_img(width, height)
+        self.current_file_path = None  # not saved yet -> Save will ask for a file name
+        self.history.clear()
+        self._update_undo_redo_state()
+        self._update_display()
+        self.status_bar.showMessage(f"New image: {width}x{height} px")
+
+    def show_properties(self) -> None:
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Open an image first.")
+            return
+        props = img_properties(self.current_image, self.current_file_path)
+        if self.current_file_path is None:
+            props["File"] = "Not saved yet"
+        text = "\n".join(f"{key}: {value}" for key, value in props.items())
+        QMessageBox.information(self, "Image Properties", text)
 
     def open_image(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
