@@ -48,3 +48,29 @@ def save_img(image, path):
 
     # save image
     buffer.tofile(path)
+
+
+def new_img(width, height, color=(255, 255, 255)):
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Width and height must be positive, got {width}x{height}")
+    if len(color) != 3 or not all(0 <= c <= 255 for c in color):
+        raise ValueError(f"Color must be (R, G, B) with values 0-255, got {color}")
+
+    image = np.empty((height, width, 3), dtype=np.uint8)
+    image[:] = color
+    return image
+
+
+def img_properties(image, path=None):
+    check_img(image)
+    height, width, channels = image.shape
+    props = {
+        "Width": f"{width} px",
+        "Height": f"{height} px",
+        "Channels": f"{channels} (RGB)",
+    }
+    if path and os.path.isfile(path):
+        props["File name"] = os.path.basename(path)
+        props["Format"] = os.path.splitext(path)[1].lstrip(".").upper()
+        props["File size"] = f"{os.path.getsize(path) / 1024:.1f} KB"
+    return props
