@@ -9,13 +9,14 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette
 from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
-from ui.canvas import ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER
+from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
+                       TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
 from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
 from core.image_io import read_img, save_img, new_img, img_properties
-from core.drawing import draw_brush_stroke, get_pixel_color
+from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
 from core.filters import (
@@ -24,6 +25,8 @@ from core.filters import (
     histogram_threshold,
     sobel_filter,
 )
+
+SHAPE_TOOLS = (TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -109,21 +112,29 @@ class MainWindow(QMainWindow):
         self.picker_tool_act = self._add_tool("Pick color", TOOL_PICKER, "picker",
                                               "Color picker: click the image to use that color for the brush")
 
+        self.rect_tool_act = self._add_tool("Rectangle", TOOL_RECT, "rectangle", "Rectangle: drag to draw")
+        self.ellipse_tool_act = self._add_tool("Ellipse", TOOL_ELLIPSE, "ellipse", "Ellipse: drag to draw")
+        self.line_tool_act = self._add_tool("Line", TOOL_LINE, "line", "Line: drag to draw")
+
         self.hand_tool_act.setChecked(True)
-        self.crop_tool_act.setToolTip("Crop: drag a rectangle over the image")
-        self.select_tool_act.setEnabled(False)
 
         self.tool_group.triggered.connect(lambda act: self.canvas.set_tool(act.data()))
         # Crop Tool
         self._crop_start = None
         self._stroke_points = []
+        self._shape_start = None
         self.brush_color = (255, 0, 0) #red in the beginning
         self.brush_size = 5
         self.color_act = self._make_action("Color", self.choose_brush_color, None, "Brush color")
         self.size_act = self._make_action(f"Size: {self.brush_size}", self.choose_brush_size, None,
                                           "Size of the brush and the eraser")
+        self.fill_color = (255, 255, 255)
+        self.fill_act = self._make_action("Fill", self._on_fill_toggled, None, "Fill shapes (on/off)")
+        self.fill_act.setCheckable(True)
+        self.fill_color_act = self._make_action("Fill color", self.choose_fill_color, None, "Fill color for shapes")
         self._update_color_icon()
         self._update_size_icon()
+        self._update_fill_icon()
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
@@ -336,6 +347,11 @@ class MainWindow(QMainWindow):
         brush.add_large_button(self.color_act)
         brush.add_large_button(self.size_act)
 
+        shapes = self.ribbon.add_group("Shapes")
+        shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
+                                  self.line_tool_act, self.fill_act])
+        shapes.add_large_button(self.fill_color_act)
+
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
                                  self.flip_h_act, self.flip_v_act])
@@ -526,7 +542,9 @@ class MainWindow(QMainWindow):
         self._set_image(new_image)
 
     def _on_tool_pressed(self, tool, pos):
-        if tool == TOOL_CROP:
+        if tool in SHAPE_TOOLS:
+            self._shape_start = pos
+        elif tool == TOOL_CROP:
             self._crop_start = pos
         elif tool in (TOOL_BRUSH, TOOL_ERASER):
             self._stroke_points = [(pos.x(), pos.y())]
@@ -535,16 +553,18 @@ class MainWindow(QMainWindow):
             self._pick_color(pos)
 
     def _on_tool_dragged(self, tool, pos):
-        if tool == TOOL_CROP and self._crop_start is not None:
+        if tool in SHAPE_TOOLS and self._shape_start is not None:
+            self._show_image(self._draw_current_shape(self.current_image, tool, pos))
+        elif tool == TOOL_CROP and self._crop_start is not None:
             self.canvas.show_selection(self._crop_start, pos)
         elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
             self._stroke_points.append((pos.x(), pos.y()))
             self._preview_stroke(tool)
 
     def _on_tool_released(self, tool, pos):
-        if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
-            points, self._stroke_points = self._stroke_points, []
-            self._apply_edit(draw_brush_stroke, points, *self._stroke_style(tool))
+        if tool in SHAPE_TOOLS and self._shape_start is not None:
+            self._apply_edit(self._draw_current_shape, tool, pos)
+            self._shape_start = None
             return
         if tool != TOOL_CROP or self._crop_start is None:
             return
@@ -552,6 +572,31 @@ class MainWindow(QMainWindow):
         self.canvas.clear_selection()
         box = (start.x(), start.y(), pos.x(), pos.y())
         self._apply_edit(crop, box)
+
+    def _draw_current_shape(self, image, tool, end):
+        start = (self._shape_start.x(), self._shape_start.y())
+        fill = self.fill_color if self.fill_act.isChecked() else None
+        return draw_shape(image, tool, start, (end.x(), end.y()),
+                          self.brush_color, self.brush_size, fill)
+
+    def _show_image(self, image):
+        self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(image)))
+
+    def _update_fill_icon(self):
+        swatch = QPixmap(32, 32)
+        swatch.fill(QColor(*self.fill_color))
+        self.fill_color_act.setIcon(QIcon(swatch))
+
+    def choose_fill_color(self):
+        color = QColorDialog.getColor(QColor(*self.fill_color), self, "Fill color")
+        if color.isValid():
+            self.fill_color = (color.red(), color.green(), color.blue())
+            self._update_fill_icon()
+            self.fill_act.setChecked(True)  # choosing a fill color turns fill on
+
+    def _on_fill_toggled(self):
+        state = "on" if self.fill_act.isChecked() else "off"
+        self.status_bar.showMessage(f"Shape fill {state}", 2000)
 
     def _pick_color(self, pos):
         try:

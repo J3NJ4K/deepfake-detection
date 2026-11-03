@@ -9,6 +9,9 @@ TOOL_CROP = "crop"
 TOOL_BRUSH = "brush"
 TOOL_ERASER = "eraser"
 TOOL_PICKER = "picker"
+TOOL_RECT = "rectangle"
+TOOL_ELLIPSE = "ellipse"
+TOOL_LINE = "line"
 
 
 class ImageCanvas(QGraphicsView):
