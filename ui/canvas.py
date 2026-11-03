@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent
-from PySide6.QtCore import Qt, Signal, QPointF
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
+from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 
 # Noms des outils (utilisés par la barre d'outils et par le canvas)
 TOOL_HAND = "hand"      # déplacer / faire défiler l'image (outil par défaut)
@@ -41,6 +41,17 @@ class ImageCanvas(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+
+        # Dashed rectangle when cropping
+        self._selection_item = QGraphicsRectItem()
+        pen = QPen(QColor(255, 255, 255))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self._selection_item.setPen(pen)
+        self._selection_item.setBrush(QColor(0, 120, 215, 60))
+        self._selection_item.setZValue(1)
+        self._selection_item.hide()
+        self._scene.addItem(self._selection_item)
 
         self._tool = TOOL_HAND
         self.set_tool(TOOL_HAND)
@@ -89,6 +100,16 @@ class ImageCanvas(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    # Selection Rectangle
+    def show_selection(self, start: QPointF, end: QPointF) -> None:
+        rect = QRectF(start, end).normalized()
+        rect = rect.intersected(self._pixmap_item.boundingRect())  # keep it inside the image
+        self._selection_item.setRect(rect)
+        self._selection_item.show()
+
+    def clear_selection(self) -> None:
+        self._selection_item.hide()
 
     # ------------------------------------------------------------------
     # Affichage et zoom
