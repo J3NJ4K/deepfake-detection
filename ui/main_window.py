@@ -18,6 +18,7 @@ from ui.ribbon import Ribbon
 from ui.layers import LayerStack, overlay_from_drawing
 from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
+from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -49,7 +50,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Machine Vision Photo Editor & Deepfake Detector")
-        self.resize(1100, 700)
+        self.resize(1280, 760)
 
         # The document is a stack of layers (see ui/layers.py).
         # self.current_image (property below) = pixels of the ACTIVE layer, NumPy RGB uint8.
@@ -174,7 +175,7 @@ class MainWindow(QMainWindow):
         self._stroke_mask = None    # coverage of the stroke being drawn (see _begin_stroke)
         self._shape_start = None
         self._shape_view = None     # screen image when a shape started (for its preview)
-        self.brush_color = (255, 0, 0) #red in the beginning
+        self.brush_color = (0, 0, 0)  # black in the beginning, like Paint
         self.brush_size = 5
         self.brush_opacity = 1.0    # 0..1, set with the tool options bar
         self.color_act = self._make_action("Color", self.choose_brush_color, None,
@@ -258,6 +259,10 @@ class MainWindow(QMainWindow):
         edit_menu = menubar.addMenu("&Edit")
         edit_menu.addAction(self.undo_act)
         edit_menu.addAction(self.redo_act)
+
+        # Undo / Redo also as icons right after the menus, like Paint (saves room in the ribbon)
+        menubar.addAction(self.undo_act)
+        menubar.addAction(self.redo_act)
 
     def apply_gaussian_blur(self):
         if self.current_image is None:
@@ -416,31 +421,32 @@ class MainWindow(QMainWindow):
         self.ribbon = Ribbon(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.ribbon)
 
-        history = self.ribbon.add_group("History")
-        history.add_small_buttons([self.undo_act, self.redo_act])
+        image = self.ribbon.add_group("Image")
+        image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
+                                 self.flip_h_act, self.flip_v_act,
+                                 self.rot_180_act, self.flip_d_act])
+        image.add_large_button(self.resize_act)
 
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
                                  self.crop_tool_act, self.brush_tool_act,
-                                 self.eraser_tool_act, self.picker_tool_act])
-
-        pen = self.ribbon.add_group("Pen")
-        pen.add_large_button(self.color_act)
-        pen.add_large_button(self.size_act)
+                                 self.eraser_tool_act, self.picker_tool_act,
+                                 self.fill_tool_act])
 
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
                                   self.line_tool_act, self.triangle_tool_act,
                                   self.right_triangle_tool_act, self.diamond_tool_act,
                                   self.star_tool_act, self.arrow_tool_act])
-        shapes.add_large_button(self.fill_tool_act)
-        shapes.add_large_button(self.fill_color_act)
 
-        image = self.ribbon.add_group("Image")
-        image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
-                                 self.flip_h_act, self.flip_v_act,
-                                 self.rot_180_act, self.flip_d_act])
-        image.add_large_button(self.resize_act)
+        # One colour block for the brush, the shapes and the fill tool
+        colors = self.ribbon.add_group("Colors")
+        self.color_palette = ColorPalette(self.brush_color, self.fill_color)
+        self.color_palette.color_chosen.connect(self._on_palette_color)
+        colors.add_widget(self.color_palette)
+
+        layers = self.ribbon.add_group("Layers")
+        layers.add_large_button(self.layers_act)
 
         filters = self.ribbon.add_group("Filters")
         filters.add_small_buttons([self.blur_act, self.sobel_act,
@@ -450,8 +456,14 @@ class MainWindow(QMainWindow):
         detection.add_large_button(self.face_detect_act)
         detection.add_large_button(self.deepfake_act)
 
-        layers = self.ribbon.add_group("Layers")
-        layers.add_large_button(self.layers_act)
+    def _on_palette_color(self, slot, rgb):
+        """A colour was picked in the Colors block (palette or colour wheel)."""
+        if slot == SLOT_COLOR:
+            self.brush_color = tuple(rgb)
+            self._update_color_icon()
+        else:
+            self.fill_color = tuple(rgb)
+            self._update_fill_icon()
 
     # ------------------------------------------------------------------
     # Undo / Redo
@@ -807,6 +819,8 @@ class MainWindow(QMainWindow):
         swatch = QPixmap(32, 32)
         swatch.fill(QColor(*self.fill_color))
         self.fill_color_act.setIcon(QIcon(swatch))
+        if hasattr(self, "color_palette"):   # keep the Colors block in sync
+            self.color_palette.set_color(SLOT_FILL, self.fill_color)
 
     def choose_fill_color(self):
         color = QColorDialog.getColor(QColor(*self.fill_color), self, "Fill color")
@@ -839,6 +853,8 @@ class MainWindow(QMainWindow):
         swatch = QPixmap(32, 32)
         swatch.fill(QColor(*self.brush_color))
         self.color_act.setIcon(QIcon(swatch))
+        if hasattr(self, "color_palette"):   # keep the Colors block in sync (e.g. after the picker)
+            self.color_palette.set_color(SLOT_COLOR, self.brush_color)
 
     def _update_size_icon(self):
         icon = QPixmap(32, 32)
