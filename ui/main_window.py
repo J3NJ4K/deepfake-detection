@@ -4,7 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog
+    QColorDialog, QHBoxLayout
 )
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette
 from PySide6.QtCore import Qt, QSize
@@ -15,6 +15,9 @@ from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUS
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
+from ui.layers import LayerStack, overlay_from_drawing
+from ui.layers_panel import LayersPanel
+from ui.tool_options import ToolOptionsBar
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -31,6 +34,16 @@ from core.filters import (
 SHAPE_TOOLS = (TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE,
                TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
 
+# Operations that change the size or orientation of the image: they are applied
+# to ALL layers so that the layers stay aligned. Everything else only changes the
+# active layer.
+# Tools that use the size setting, and the one that uses the opacity setting
+SIZE_TOOLS = (TOOL_BRUSH, TOOL_ERASER) + SHAPE_TOOLS
+OPACITY_TOOLS = (TOOL_BRUSH,)
+
+GEOMETRIC_OPS = (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
+                 flip_diagonal, resize_scale, crop)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -38,16 +51,18 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Machine Vision Photo Editor & Deepfake Detector")
         self.resize(1100, 700)
 
-        # État interne partagé : NumPy RGB uint8
-        self.current_image: np.ndarray | None = None
+        # The document is a stack of layers (see ui/layers.py).
+        # self.current_image (property below) = pixels of the ACTIVE layer, NumPy RGB uint8.
+        self.layers: LayerStack | None = None
+        self._displayed_size = None
         self.current_file_path: str | None = None
 
         # Historique pour Undo / Redo (20 étapes max)
         self.history = ImageHistory(max_steps=20)
 
-        # Composant central (Canvas)
+        # Composant central (Canvas). It is placed in the window, next to the
+        # layers panel, by _create_layers_panel().
         self.canvas = ImageCanvas(self)
-        self.setCentralWidget(self.canvas)
 
         # Barre d'état
         self.status_bar = QStatusBar()
@@ -57,9 +72,29 @@ class MainWindow(QMainWindow):
         # Initialisation UI
         self._create_actions()
         self._create_menus()
+        self._create_layers_panel()
         self._create_ribbon()
         self._create_bottom_toolbar()
         self._update_undo_redo_state()
+
+    # ------------------------------------------------------------------
+    # Current image = active layer
+    # ------------------------------------------------------------------
+    @property
+    def current_image(self) -> np.ndarray | None:
+        """Pixels of the active layer (what the tools and filters work on)."""
+        return None if self.layers is None else self.layers.active_layer.rgb
+
+    @current_image.setter
+    def current_image(self, image: np.ndarray | None) -> None:
+        """Setting a whole new image (Open, New) starts a new document with one layer."""
+        self.layers = None if image is None else LayerStack.from_image(image)
+        self._displayed_size = None
+        self._refresh_layers_panel()
+
+    def _composite(self) -> np.ndarray | None:
+        """The image as the user sees it: all visible layers merged."""
+        return None if self.layers is None else self.layers.composite()
 
     def _make_action(self, text: str, slot, icon_name: str | None = None,
                      tooltip: str | None = None, shortcut=None) -> QAction:
@@ -86,10 +121,10 @@ class MainWindow(QMainWindow):
                                          shortcut=QKeySequence.StandardKey.New)
         self.open_act = self._make_action("&Open...", self.open_image,
                                           shortcut=QKeySequence.StandardKey.Open)
-        self.save_act = self._make_action("&Save", self.save_image,
-                                          shortcut=QKeySequence.StandardKey.Save)
-        self.save_as_act = self._make_action("Save &As...", self.save_image_as,
-                                             shortcut=QKeySequence.StandardKey.SaveAs)
+        self.save_act = self._make_action("&Save", self.save_image, "disk", "Save (Ctrl+S)",
+                                          QKeySequence.StandardKey.Save)
+        self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
+                                             "Save As (Ctrl+Shift+S)", QKeySequence.StandardKey.SaveAs)
         self.properties_act = self._make_action("&Properties...", self.show_properties)
         self.quit_act = self._make_action("&Quit", self.close,
                                           shortcut=QKeySequence.StandardKey.Quit)
@@ -136,9 +171,12 @@ class MainWindow(QMainWindow):
         # Crop Tool
         self._crop_start = None
         self._stroke_points = []
+        self._stroke_mask = None    # coverage of the stroke being drawn (see _begin_stroke)
         self._shape_start = None
+        self._shape_view = None     # screen image when a shape started (for its preview)
         self.brush_color = (255, 0, 0) #red in the beginning
         self.brush_size = 5
+        self.brush_opacity = 1.0    # 0..1, set with the tool options bar
         self.color_act = self._make_action("Color", self.choose_brush_color, None,
                                            "Color for the brush, lines and shape outlines")
         self.size_act = self._make_action(f"Size: {self.brush_size}", self.choose_brush_size, None,
@@ -186,10 +224,13 @@ class MainWindow(QMainWindow):
     def _on_tool_clicked(self, action):
         """Switch to the clicked tool, or back to the Hand if the active tool was clicked again."""
         if action.isChecked():
-            self.canvas.set_tool(action.data())
+            tool = action.data()
         else:
             self.hand_tool_act.setChecked(True)
-            self.canvas.set_tool(TOOL_HAND)
+            tool = TOOL_HAND
+        self.canvas.set_tool(tool)
+        # Show the size / opacity bar only for the tools that use them
+        self.tool_options.show_for_tool(tool in SIZE_TOOLS, tool in OPACITY_TOOLS)
 
     def _add_tool(self, text: str, tool_name: str, icon_name: str, tooltip: str) -> QAction:
         """Crée une action d'outil "cochable" et l'ajoute au groupe exclusif."""
@@ -268,18 +309,21 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            boxes = detect_faces(self.current_image)
+            # Detect on what the user sees (all visible layers merged)
+            boxes = detect_faces(self._composite())
             if not boxes:
                 QMessageBox.information(self, "Face Detection", "No faces detected in the image.")
                 return
 
-            # On fait une copie de travail pour dessiner sans altérer définitivement l'original si besoin
-            annotated_image = self.current_image.copy()
-            for (x1, y1, x2, y2) in boxes:
-                # Rectangle bleu (RGB: 0, 150, 255) avec épaisseur proportionnelle
-                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 150, 255), 2)
+            def draw_boxes(image):
+                image = image.copy()
+                for (x1, y1, x2, y2) in boxes:
+                    # Rectangle bleu (RGB: 0, 150, 255)
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 150, 255), 2)
+                return image
 
-            self._set_image(annotated_image)
+            # The boxes go on their own layer: hide or delete it to get the clean photo back
+            self._add_overlay_layer("Faces", draw_boxes)
             self.status_bar.showMessage(f"Detected {len(boxes)} face(s).")
             QMessageBox.information(self, "Face Detection", f"Successfully detected {len(boxes)} face(s).")
 
@@ -293,7 +337,8 @@ class MainWindow(QMainWindow):
 
         self.status_bar.showMessage("Running deepfake analysis...")
         try:
-            results = analyze_deepfake(self.current_image)
+            # Analyse what the user sees (all visible layers merged)
+            results = analyze_deepfake(self._composite())
             if not results:
                 QMessageBox.information(
                     self, "Deepfake Detection", "No faces detected to analyze."
@@ -301,51 +346,54 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("Analysis complete: No faces detected.")
                 return
 
-            annotated_image = self.current_image.copy()
             summary_messages = []
-
             for i, res in enumerate(results, start=1):
-                x1, y1, x2, y2 = res["bbox"]
                 prob = res["manipulation_probability"]
-                is_fake = prob >= 0.5
-
-                # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
-                color = (255, 50, 50) if is_fake else (50, 205, 50)
-                label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
-
-                # Dessiner le cadre
-                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
-
-                # Dessiner une étiquette texte au-dessus de la boîte
-                font_scale = 0.6
-                thickness = 2
-                (text_w, text_h), baseline = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-                )
-                # Fond plein sous le texte pour la lisibilité
-                cv2.rectangle(
-                    annotated_image,
-                    (x1, max(0, y1 - text_h - 10)),
-                    (x1 + text_w, y1),
-                    color,
-                    -1,
-                )
-                cv2.putText(
-                    annotated_image,
-                    label,
-                    (x1, max(text_h, y1 - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale,
-                    (255, 255, 255),
-                    thickness,
-                    lineType=cv2.LINE_AA,
-                )
-
-                verdict = "Manipulated (Fake)" if is_fake else "Authentic (Real)"
+                verdict = "Manipulated (Fake)" if prob >= 0.5 else "Authentic (Real)"
                 summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
 
-            # Mettre à jour l'image affichée (annulable avec Ctrl+Z)
-            self._set_image(annotated_image)
+            def draw_results(image):
+                image = image.copy()
+                for res in results:
+                    x1, y1, x2, y2 = res["bbox"]
+                    prob = res["manipulation_probability"]
+                    is_fake = prob >= 0.5
+
+                    # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
+                    color = (255, 50, 50) if is_fake else (50, 205, 50)
+                    label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
+
+                    # Dessiner le cadre
+                    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+
+                    # Dessiner une étiquette texte au-dessus de la boîte
+                    font_scale = 0.6
+                    thickness = 2
+                    (text_w, text_h), baseline = cv2.getTextSize(
+                        label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+                    )
+                    # Fond plein sous le texte pour la lisibilité
+                    cv2.rectangle(
+                        image,
+                        (x1, max(0, y1 - text_h - 10)),
+                        (x1 + text_w, y1),
+                        color,
+                        -1,
+                    )
+                    cv2.putText(
+                        image,
+                        label,
+                        (x1, max(text_h, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale,
+                        (255, 255, 255),
+                        thickness,
+                        lineType=cv2.LINE_AA,
+                    )
+                return image
+
+            # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
+            self._add_overlay_layer("Deepfake analysis", draw_results)
 
             report = "\n".join(summary_messages)
             self.status_bar.showMessage("Deepfake analysis complete.")
@@ -354,6 +402,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to run deepfake analysis: {e}")
             self.status_bar.showMessage("Analysis failed.")
+
+    def _add_overlay_layer(self, name, draw):
+        """Put what draw(image) draws on a new transparent layer at the top."""
+        height, width = self.layers.size
+        rgb, alpha = overlay_from_drawing(draw, height, width)
+        self._push_history()
+        self.layers.add_layer_on_top(name, rgb, alpha)
+        self._after_edit()
 
     def _create_ribbon(self):
         """Ruban en haut de la fenêtre, style Paint : un groupe par famille de fonctions."""
@@ -394,46 +450,145 @@ class MainWindow(QMainWindow):
         detection.add_large_button(self.face_detect_act)
         detection.add_large_button(self.deepfake_act)
 
+        layers = self.ribbon.add_group("Layers")
+        layers.add_large_button(self.layers_act)
+
     # ------------------------------------------------------------------
     # Undo / Redo
     # ------------------------------------------------------------------
     def _set_image(self, new_image: np.ndarray) -> None:
         """
-        Remplace l'image courante en sauvegardant l'ancienne dans l'historique.
-        Toute modification de l'image doit passer par ici pour être annulable.
+        Remplace les pixels du calque actif (sa transparence est gardée), en sauvegardant
+        l'état précédent dans l'historique. Utilisé par les filtres.
+        Pour dessiner sur un calque, utiliser plutôt _apply_edit (voir plus bas).
         """
-        if self.current_image is not None:
-            self.history.push(self.current_image)
-        self.current_image = new_image
+        if self.layers is None:
+            self.current_image = new_image
+            self._after_edit()
+            return
+        self._push_history()
+        self.layers.active_layer.rgb = new_image
+        self._after_edit()
+
+    def _push_history(self) -> None:
+        """Save the current state of all layers (cheap: the arrays are shared, not copied)."""
+        self.history.push(self.layers.snapshot())
+
+    def _after_edit(self) -> None:
         self._update_display()
         self._update_undo_redo_state()
+        self._refresh_layers_panel()
 
     def undo(self) -> None:
-        if self.current_image is None:
+        if self.layers is None:
             return
-        previous = self.history.undo(self.current_image)
+        previous = self.history.undo(self.layers.snapshot())
         if previous is None:
             return
-        self.current_image = previous
-        self._update_display()
-        self._update_undo_redo_state()
+        self.layers = previous
+        self._after_edit()
         self.status_bar.showMessage("Undo", 2000)
 
     def redo(self) -> None:
-        if self.current_image is None:
+        if self.layers is None:
             return
-        following = self.history.redo(self.current_image)
+        following = self.history.redo(self.layers.snapshot())
         if following is None:
             return
-        self.current_image = following
-        self._update_display()
-        self._update_undo_redo_state()
+        self.layers = following
+        self._after_edit()
         self.status_bar.showMessage("Redo", 2000)
 
     def _update_undo_redo_state(self) -> None:
         """Grise les boutons Undo / Redo quand il n'y a rien à annuler / rétablir."""
         self.undo_act.setEnabled(self.history.can_undo())
         self.redo_act.setEnabled(self.history.can_redo())
+
+    # ------------------------------------------------------------------
+    # Layers panel
+    # ------------------------------------------------------------------
+    def _create_layers_panel(self):
+        """
+        Side bar on the right of the image (fixed width, not movable),
+        shown / hidden with the "Layers" button of the ribbon (or F7).
+        """
+        self.layers_panel = LayersPanel(self)
+        self.layers_panel.setFixedWidth(220)
+        self.layers_panel.hide()
+
+        # Size / opacity bar on the left, shown when a drawing tool is selected
+        self.tool_options = ToolOptionsBar(self)
+        self.tool_options.set_size(self.brush_size)
+        self.tool_options.set_opacity(round(self.brush_opacity * 100))
+        self.tool_options.size_changed.connect(self.set_brush_size)
+        self.tool_options.opacity_changed.connect(self.set_brush_opacity)
+
+        # Central area = [ tool options | canvas | layers panel ]
+        central = QWidget(self)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.tool_options)
+        layout.addWidget(self.canvas, 1)       # the canvas takes all the remaining space
+        layout.addWidget(self.layers_panel)
+        self.setCentralWidget(central)
+
+        # Checkable button that shows / hides the panel
+        self.layers_act = self._make_action("Layers", None, "layers",
+                                            "Show / hide the layers panel (F7)", "F7")
+        self.layers_act.setCheckable(True)
+        self.layers_act.toggled.connect(self.layers_panel.setVisible)
+
+        self.layers_panel.add_requested.connect(self.add_layer)
+        self.layers_panel.delete_requested.connect(self.delete_layer)
+        self.layers_panel.active_changed.connect(self._on_active_layer_changed)
+        self.layers_panel.visibility_changed.connect(self._on_layer_visibility_changed)
+        self.layers_panel.opacity_changed.connect(self._on_layer_opacity_changed)
+        self.layers_panel.renamed.connect(self._on_layer_renamed)
+
+    def _refresh_layers_panel(self) -> None:
+        if hasattr(self, "layers_panel"):
+            self.layers_panel.set_layers(self.layers)
+
+    def add_layer(self) -> None:
+        if self.layers is None:
+            return
+        self._push_history()
+        layer = self.layers.add_layer()
+        self._after_edit()
+        self.status_bar.showMessage(f"Added {layer.name}", 2000)
+
+    def delete_layer(self) -> None:
+        if self.layers is None:
+            return
+        if len(self.layers) == 1:
+            QMessageBox.warning(self, "Warning", "The image needs at least one layer.")
+            return
+        self._push_history()
+        name = self.layers.active_layer.name
+        self.layers.delete_layer(self.layers.active)
+        self._after_edit()
+        self.status_bar.showMessage(f"Deleted {name}", 2000)
+
+    def _on_active_layer_changed(self, index: int) -> None:
+        if self.layers is not None and 0 <= index < len(self.layers):
+            self.layers.active = index
+            self.status_bar.showMessage(f"Drawing on: {self.layers.active_layer.name}", 2000)
+
+    def _on_layer_visibility_changed(self, index: int, visible: bool) -> None:
+        layer = self.layers.layers[index]
+        if layer.visible != visible:
+            layer.visible = visible
+            self._update_display()
+
+    def _on_layer_opacity_changed(self, index: int, percent: int) -> None:
+        self.layers.layers[index].opacity = percent / 100
+        self._update_display()
+
+    def _on_layer_renamed(self, index: int, name: str) -> None:
+        name = name.strip()
+        if name:
+            self.layers.layers[index].name = name
 
     def _create_bottom_toolbar(self):
         self.bottom_toolbar = QToolBar("Quick Tools", self)
@@ -460,13 +615,19 @@ class MainWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self.zoom_control.set_percent)
 
     def _update_display(self):
-        if self.current_image is not None:
-            qimg = numpy_to_qimage(self.current_image)
-            pixmap = QPixmap.fromImage(qimg)
-            self.canvas.set_pixmap(pixmap)
+        if self.layers is not None:
+            image = self._composite()
+            pixmap = QPixmap.fromImage(numpy_to_qimage(image))
+            h, w, _ = image.shape
+            if (h, w) == self._displayed_size:
+                # Same size: just replace the picture and keep the user's zoom
+                self.canvas.show_preview(pixmap)
+            else:
+                # New size (open, new, rotate, crop, resize...): fit to the window
+                self.canvas.set_pixmap(pixmap)
+                self._displayed_size = (h, w)
             self.zoom_control.setEnabled(True)
-            h, w, _ = self.current_image.shape
-            self.status_bar.showMessage(f"Image: {w}x{h} px | Format: RGB uint8")
+            self.status_bar.showMessage(f"Image: {w}x{h} px | Layers: {len(self.layers)}")
 
     def new_image(self) -> None:
         width, ok = QInputDialog.getInt(self, "New image", "Width (px):", 800, 1, 10000)
@@ -487,7 +648,7 @@ class MainWindow(QMainWindow):
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "Open an image first.")
             return
-        props = img_properties(self.current_image, self.current_file_path)
+        props = img_properties(self._composite(), self.current_file_path)
         if self.current_file_path is None:
             props["File"] = "Not saved yet"
         text = "\n".join(f"{key}: {value}" for key, value in props.items())
@@ -552,32 +713,59 @@ class MainWindow(QMainWindow):
         """Enregistre l'image courante. Renvoie True si ça a marché."""
         try:
             # save_img(image, path) : l'image NumPy d'abord, le chemin ensuite
-            save_img(self.current_image, path)
+            # All visible layers are merged into one image when saving
+            save_img(self._composite(), path)
             self.status_bar.showMessage(f"Saved: {os.path.basename(path)}")
             return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
             return False
 
-    def _apply_edit(self, operation, *args):
+    def _apply_edit(self, operation, *args, erase=False):
+        """
+        Apply operation(image, *args) and save the previous state for undo.
+        - Geometric operations (rotate, flip, resize, crop) are applied to all layers.
+        - Anything else (brush, shapes, fill...) draws on the active layer only;
+          with erase=True the painted pixels become transparent instead (eraser).
+        """
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "Open an image first.")
             return
         try:
-            new_image = operation(self.current_image, *args)
+            if operation in GEOMETRIC_OPS:
+                new_stack = self.layers.snapshot()
+                new_stack.apply_to_all(operation, args)
+            else:
+                rgb, alpha = self.layers.edit_active(operation, args, erase)
         except ValueError as error:
             QMessageBox.warning(self, "Warning", str(error))
             return
-        self._set_image(new_image)
+
+        self._push_history()
+        if operation in GEOMETRIC_OPS:
+            self.layers = new_stack
+        else:
+            self.layers.active_layer.rgb, self.layers.active_layer.alpha = rgb, alpha
+        self._after_edit()
+
+    def _show_edit_preview(self, operation, args, erase=False):
+        """Live preview of a drawing operation on the active layer, without saving it."""
+        if self.layers is None:
+            return
+        try:
+            override = self.layers.edit_active(operation, args, erase)
+        except ValueError:
+            return
+        self._show_image(self.layers.composite(override))
 
     def _on_tool_pressed(self, tool, pos):
         if tool in SHAPE_TOOLS:
             self._shape_start = pos
+            self._shape_view = None
         elif tool == TOOL_CROP:
             self._crop_start = pos
         elif tool in (TOOL_BRUSH, TOOL_ERASER):
-            self._stroke_points = [(pos.x(), pos.y())]
-            self._preview_stroke(tool)
+            self._begin_stroke(tool, pos)
         elif tool == TOOL_PICKER:
             self._pick_color(pos)
         elif tool == TOOL_FILL:
@@ -585,21 +773,20 @@ class MainWindow(QMainWindow):
 
     def _on_tool_dragged(self, tool, pos):
         if tool in SHAPE_TOOLS and self._shape_start is not None:
-            self._show_image(self._draw_current_shape(self.current_image, tool, pos))
+            self._preview_shape(tool, pos)
         elif tool == TOOL_CROP and self._crop_start is not None:
             self.canvas.show_selection(self._crop_start, pos)
-        elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
-            self._stroke_points.append((pos.x(), pos.y()))
-            self._preview_stroke(tool)
+        elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
+            self._continue_stroke(pos)
 
     def _on_tool_released(self, tool, pos):
         if tool in SHAPE_TOOLS and self._shape_start is not None:
             self._apply_edit(self._draw_current_shape, tool, pos)
             self._shape_start = None
+            self._shape_view = None
             return
-        if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_points:
-            points, self._stroke_points = self._stroke_points, []
-            self._apply_edit(draw_brush_stroke, points, *self._stroke_style(tool))
+        if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
+            self._end_stroke()
             return
         if tool != TOOL_CROP or self._crop_start is None:
             return
@@ -635,7 +822,7 @@ class MainWindow(QMainWindow):
 
     def _pick_color(self, pos):
         try:
-            color = get_pixel_color(self.current_image, pos.x(), pos.y())
+            color = get_pixel_color(self._composite(), pos.x(), pos.y())  # colour as seen on screen
         except ValueError:
             return  # clicked outside the image: do nothing
         self.brush_color = color
@@ -674,16 +861,144 @@ class MainWindow(QMainWindow):
     def choose_brush_size(self):
         size, ok = QInputDialog.getInt(self, "Size", "Size (px):", self.brush_size, 1, 200)
         if ok:
-            self.brush_size = size
-            self.size_act.setText(f"Size: {size}")
-            self._update_size_icon()
-            self.canvas.set_brush_size(size)
+            self.set_brush_size(size)
 
-    def _preview_stroke(self, tool):
-        if self.current_image is None:
+    def set_brush_size(self, size: int) -> None:
+        """Single place that changes the size (dialog, slider or typed value)."""
+        self.brush_size = size
+        self.size_act.setText(f"Size: {size}")
+        self._update_size_icon()
+        self.canvas.set_brush_size(size)
+        self.tool_options.set_size(size)
+
+    def set_brush_opacity(self, percent: int) -> None:
+        self.brush_opacity = percent / 100
+        self.tool_options.set_opacity(percent)
+
+    # ------------------------------------------------------------------
+    # Brush / eraser strokes
+    # ------------------------------------------------------------------
+    # While the mouse moves, only the new piece of the stroke (from the previous mouse
+    # position to the new one) is drawn, and only its small rectangle of the screen is
+    # recomputed. This keeps drawing smooth whatever the image size, the length of the
+    # stroke or the number of layers.
+    #
+    # The stroke is first drawn as a coverage mask (0 = untouched, 255 = fully covered,
+    # with soft anti-aliased edges), then mixed with the active layer using the colour
+    # and the opacity of the brush (or removed from the layer for the eraser).
+
+    def _begin_stroke(self, tool, pos):
+        if self.layers is None:
             return
-        preview = draw_brush_stroke(self.current_image, self._stroke_points, *self._stroke_style(tool))
-        self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(preview)))
+        self._stroke_tool = tool
+        self._stroke_mask = np.zeros(self.layers.size, dtype=np.uint8)
+        self._stroke_view = self._composite().copy()   # what the screen shows during the stroke
+        self._stroke_box = None                        # rectangle covered by the stroke so far
+        point = (pos.x(), pos.y())
+        self._stroke_points = [point]
+        self._add_stroke_segment(point, point)
+
+    def _continue_stroke(self, pos):
+        point = (pos.x(), pos.y())
+        self._add_stroke_segment(self._stroke_points[-1], point)
+        self._stroke_points.append(point)
+
+    def _end_stroke(self):
+        box, self._stroke_box = self._stroke_box, None
+        if box is not None:
+            y0, y1, x0, x1 = box
+            region = (slice(y0, y1), slice(x0, x1))
+            rgb, alpha = self._stroke_result(region)
+            layer = self.layers.active_layer
+            new_rgb, new_alpha = layer.rgb.copy(), layer.alpha.copy()
+            new_rgb[region], new_alpha[region] = rgb, alpha
+            self._push_history()
+            layer.rgb, layer.alpha = new_rgb, new_alpha
+            # The preview shown during the stroke is exactly the final image: reuse it
+            self.layers.remember_composite(self._stroke_view)
+            self._after_edit()
+        self._stroke_mask = None
+        self._stroke_view = None
+        self._stroke_points = []
+
+    def _add_stroke_segment(self, p0, p1):
+        height, width = self.layers.size
+        margin = self.brush_size // 2 + 2
+        x0 = max(0, int(min(p0[0], p1[0])) - margin)
+        x1 = min(width, int(max(p0[0], p1[0])) + margin + 1)
+        y0 = max(0, int(min(p0[1], p1[1])) - margin)
+        y1 = min(height, int(max(p0[1], p1[1])) + margin + 1)
+        if x0 >= x1 or y0 >= y1:
+            return  # completely outside the image
+        region = (slice(y0, y1), slice(x0, x1))
+
+        # Draw the new piece on the coverage mask with the project's brush function
+        points = [(p0[0] - x0, p0[1] - y0)]
+        if p1 != p0:
+            points.append((p1[0] - x0, p1[1] - y0))
+        mask = self._stroke_mask[region]
+        drawn = draw_brush_stroke(np.dstack([mask] * 3), points, (255, 255, 255), self.brush_size)
+        self._stroke_mask[region] = np.maximum(mask, drawn[:, :, 0])
+
+        # Update only this rectangle of the screen
+        rgb, alpha = self._stroke_result(region)
+        self._stroke_view[region] = self.layers.blend_region(region, rgb, alpha)
+        self._show_image(self._stroke_view)
+
+        if self._stroke_box is None:
+            self._stroke_box = (y0, y1, x0, x1)
+        else:
+            b = self._stroke_box
+            self._stroke_box = (min(b[0], y0), max(b[1], y1), min(b[2], x0), max(b[3], x1))
+
+    def _stroke_result(self, region):
+        """Active layer inside `region` with the current stroke applied: (rgb, alpha)."""
+        layer = self.layers.active_layer
+        coverage = self._stroke_mask[region].astype(np.float32)[:, :, None] / 255.0
+        alpha = layer.alpha[region].astype(np.float32)[:, :, None] / 255.0
+
+        if self._stroke_tool == TOOL_ERASER:
+            # Eraser: make the layer transparent where the stroke passes
+            new_alpha = alpha * (1.0 - coverage)
+            return layer.rgb[region], (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8)
+
+        # Brush: paint the colour "over" the layer with the chosen opacity
+        paint = coverage * self.brush_opacity
+        color = np.array(self.brush_color, dtype=np.float32)
+        rgb = layer.rgb[region].astype(np.float32)
+        new_alpha = paint + alpha * (1.0 - paint)
+        new_rgb = (color * paint + rgb * alpha * (1.0 - paint)) / np.maximum(new_alpha, 1e-6)
+        return (np.clip(new_rgb + 0.5, 0, 255).astype(np.uint8),
+                (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8))
+
+    def _preview_shape(self, tool, pos):
+        """Live preview of a shape: only the rectangle around the shape is recomputed."""
+        if self.layers is None:
+            return
+        if self._shape_view is None:
+            self._shape_view = self._composite()
+        height, width = self.layers.size
+        sx, sy = self._shape_start.x(), self._shape_start.y()
+        ex, ey = pos.x(), pos.y()
+        margin = self.brush_size + 3
+        x0 = max(0, int(min(sx, ex)) - margin)
+        x1 = min(width, int(max(sx, ex)) + margin + 1)
+        y0 = max(0, int(min(sy, ey)) - margin)
+        y1 = min(height, int(max(sy, ey)) + margin + 1)
+        view = self._shape_view.copy()
+        if x0 < x1 and y0 < y1:
+            region = (slice(y0, y1), slice(x0, x1))
+
+            def draw(image):
+                return draw_shape(image, tool, (sx - x0, sy - y0), (ex - x0, ey - y0),
+                                  self.brush_color, self.brush_size)
+
+            try:
+                rgb, alpha = self.layers.edit_region(draw, region)
+                view[region] = self.layers.blend_region(region, rgb, alpha)
+            except ValueError:
+                return
+        self._show_image(view)
 
 
     def resize_image(self):
