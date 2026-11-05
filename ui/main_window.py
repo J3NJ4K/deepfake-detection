@@ -15,7 +15,8 @@ from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUS
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
-from core.transform import rotate_left, rotate_right, flip_horizontal, flip_vertical, resize_scale, crop
+from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
+                            flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
@@ -161,6 +162,10 @@ class MainWindow(QMainWindow):
                                             "reflect-horizontal", "Flip Horizontal (mirror)")
         self.flip_v_act = self._make_action("Flip &Vertical", lambda: self._apply_edit(flip_vertical),
                                             "reflect-vertical", "Flip Vertical (upside down)")
+        self.rot_180_act = self._make_action("180°", lambda: self._apply_edit(rotate_180),
+                                             "rotate_180", "Rotate 180°")
+        self.flip_d_act = self._make_action("Transpose", lambda: self._apply_edit(flip_diagonal),
+                                            "reflect-diagonal", "Flip Diagonal (swap rows and columns)")
         self.resize_act = self._make_action("&Resize...", self.resize_image, "resize", "Resize the image")
 
         # --- Filters ---
@@ -377,7 +382,8 @@ class MainWindow(QMainWindow):
 
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
-                                 self.flip_h_act, self.flip_v_act])
+                                 self.flip_h_act, self.flip_v_act,
+                                 self.rot_180_act, self.flip_d_act])
         image.add_large_button(self.resize_act)
 
         filters = self.ribbon.add_group("Filters")
