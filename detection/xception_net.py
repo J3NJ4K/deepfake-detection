@@ -61,7 +61,7 @@ class Xception(nn.Module):
         super().__init__()
 
         # layer names has to match the checkpoint keys exactly, or loading fails
-        # entry flow: reduce the image size and increase the number of channels
+        # entry flow: reduces the image size and increases the number of channels
         self.conv1 = nn.Conv2d(3, 32, 3, 2, 0, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.relu = nn.ReLU(inplace=True)
@@ -88,13 +88,18 @@ class Xception(nn.Module):
             nn.Conv2d(2048, 512, 1, 1), nn.BatchNorm2d(512), nn.ReLU(inplace=False)
         )
 
-    def forward(self, x):
-        # run through all layers, then average each feature map into one value and classify
+    def features(self, x):
+        # runs the image through all conv layers, output is (B, 2048, 8, 8)
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.relu(self.bn2(self.conv2(x)))
         for i in range(1, 13):
             x = getattr(self, f"block{i}")(x)
         x = self.relu(self.bn3(self.conv3(x)))
-        x = self.relu(self.bn4(self.conv4(x)))
-        x = F.adaptive_avg_pool2d(x, 1).flatten(1)
-        return self.last_linear(x)
+        return self.relu(self.bn4(self.conv4(x)))
+
+    def classify(self, fmap):
+        # averages each feature map to one number, then decides real or fake
+        return self.last_linear(F.adaptive_avg_pool2d(fmap, 1).flatten(1))
+
+    def forward(self, x):
+        return self.classify(self.features(x))
