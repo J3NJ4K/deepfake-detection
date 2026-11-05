@@ -25,6 +25,7 @@ from core.image_io import read_img, save_img, new_img, img_properties
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
+from detection.gradcam import heatmap_layer
 from core.filters import (
     binary_threshold,
     gaussian_blur,
@@ -396,6 +397,12 @@ class MainWindow(QMainWindow):
                         lineType=cv2.LINE_AA,
                     )
                 return image
+
+            # Grad-CAM on its own layer below the boxes, stronger for more suspicious faces
+            height, width = self.layers.size
+            self._push_history()
+            self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(results, height, width))
+            self._after_edit()
 
             # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
             self._add_overlay_layer("Deepfake analysis", draw_results)

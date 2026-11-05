@@ -25,12 +25,33 @@ def overlay(image: np.ndarray, cam: np.ndarray, box: tuple[int, int, int, int], 
     heat = cv2.resize(cam, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
 
     # colors, blue low, red high
-    heat = cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
+    colored = cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
 
     out = image.copy()
     # transparency follows the heatmap: 0 = invisible, 1 = `alpha` strength
-    a = (cv2.resize(cam, (x2 - x1, y2 - y1)) * alpha)[..., None]
+    a = (heat * alpha)[..., None]
     region = out[y1:y2, x1:x2].astype(np.float32)
-    out[y1:y2, x1:x2] = (region * (1 - a) + heat * a).astype(np.uint8)
+    out[y1:y2, x1:x2] = (region * (1 - a) + colored * a).astype(np.uint8)
     return out
+
+def heatmap_layer(results: list[dict], height: int, width: int, strength: float = 0.8) -> tuple[
+        np.ndarray, np.ndarray]:
+
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    alpha = np.zeros((height, width), dtype=np.uint8)
+
+    for res in results:
+        x1, y1, x2, y2 = res["crop_box"]
+        heat = cv2.resize(res["heatmap"], (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR)
+        colored = cv2.cvtColor(cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET),
+                               cv2.COLOR_BGR2RGB)
+        # more suspicious face = stronger heatmap
+        a = (heat * strength * res["manipulation_probability"] * 255).astype(np.uint8)
+
+        # crop boxes can overlap, keep the strongest heatmap where they do
+        stronger = a > alpha[y1:y2, x1:x2]
+        rgb[y1:y2, x1:x2][stronger] = colored[stronger]
+        alpha[y1:y2, x1:x2][stronger] = a[stronger]
+
+    return rgb, alpha
