@@ -4,11 +4,11 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout, QProgressBar
+    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
                            QGuiApplication)
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QPointF
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
                        TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
@@ -23,6 +23,7 @@ from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
 from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
 from ui.filter_dialog import FilterDialog
+from ui.results_panel import ResultsPanel
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -112,6 +113,10 @@ class MainWindow(QMainWindow):
         self.layers = None if image is None else LayerStack.from_image(image)
         self._displayed_size = None
         self._refresh_layers_panel()
+        if hasattr(self, "results_panel"):     # results of the previous image are not valid any more
+            self._last_boxes = []
+            self.results_panel.clear()
+            self.canvas.clear_selection()
 
     def _composite(self) -> np.ndarray | None:
         """The image as the user sees it: all visible layers merged."""
@@ -411,9 +416,12 @@ class MainWindow(QMainWindow):
         self._set_analysis_running(False)
         if not self._analysis_still_valid():
             return
+        self._last_boxes = list(boxes)
+        self.canvas.clear_selection()
+        self.results_panel.show_faces(boxes)
+        self._open_results()
         if not boxes:
             self.status_bar.showMessage("No faces detected.", 5000)
-            QMessageBox.information(self, "Face Detection", "No faces detected in the image.")
             return
 
         def draw_boxes(image):
@@ -435,16 +443,13 @@ class MainWindow(QMainWindow):
         self._set_analysis_running(False)
         if not self._analysis_still_valid():
             return
+        self._last_boxes = [res["bbox"] for res in results]
+        self.canvas.clear_selection()
+        self.results_panel.show_deepfake(results)
+        self._open_results()
         if not results:
             self.status_bar.showMessage("Analysis complete: No faces detected.", 5000)
-            QMessageBox.information(self, "Deepfake Detection", "No faces detected to analyze.")
             return
-
-        summary_messages = []
-        for i, res in enumerate(results, start=1):
-            prob = res["manipulation_probability"]
-            verdict = "Manipulated (Fake)" if prob >= 0.5 else "Authentic (Real)"
-            summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
 
         def draw_results(image):
             image = image.copy()
@@ -475,9 +480,9 @@ class MainWindow(QMainWindow):
         # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
         self._add_overlay_layer("Deepfake analysis", draw_results)
 
-        report = "\n".join(summary_messages)
-        self.status_bar.showMessage("Deepfake analysis complete.", 5000)
-        QMessageBox.information(self, "Deepfake Analysis Results", report)
+        fakes = sum(res["manipulation_probability"] >= 0.5 for res in results)
+        self.status_bar.showMessage(f"Deepfake analysis complete: {len(results)} face(s), "
+                                    f"{fakes} likely fake.", 5000)
 
     def closeEvent(self, event):
         # Let a running analysis finish before the window (and its thread) is destroyed
@@ -531,6 +536,7 @@ class MainWindow(QMainWindow):
         detection = self.ribbon.add_group("Detection")
         detection.add_large_button(self.face_detect_act)
         detection.add_large_button(self.deepfake_act)
+        detection.add_large_button(self.results_act)
 
     def _on_palette_color(self, slot, rgb):
         """A colour was picked in the Colors block (palette or colour wheel)."""
@@ -601,7 +607,6 @@ class MainWindow(QMainWindow):
         shown / hidden with the "Layers" button of the ribbon (or F7).
         """
         self.layers_panel = LayersPanel(self)
-        self.layers_panel.setFixedWidth(220)
         self.layers_panel.hide()
 
         # Size / opacity bar on the left, shown when a drawing tool is selected
@@ -611,21 +616,43 @@ class MainWindow(QMainWindow):
         self.tool_options.size_changed.connect(self.set_brush_size)
         self.tool_options.opacity_changed.connect(self.set_brush_opacity)
 
-        # Central area = [ tool options | canvas | layers panel ]
+        # Detection results panel (under the layers panel), opens after an analysis
+        self.results_panel = ResultsPanel(self)
+        self.results_panel.hide()
+        self.results_panel.face_selected.connect(self._show_face)
+        self._last_boxes = []      # boxes of the faces listed in the results panel
+
+        # Right column = layers panel on top, results panel under it
+        self.side_column = QWidget(self)
+        self.side_column.setFixedWidth(220)
+        side = QVBoxLayout(self.side_column)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(0)
+        side.addWidget(self.layers_panel, 1)
+        side.addWidget(self.results_panel, 1)
+        self.side_column.hide()
+
+        # Central area = [ tool options | canvas | right column ]
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.tool_options)
         layout.addWidget(self.canvas, 1)       # the canvas takes all the remaining space
-        layout.addWidget(self.layers_panel)
+        layout.addWidget(self.side_column)
         self.setCentralWidget(central)
 
-        # Checkable button that shows / hides the panel
+        # Checkable buttons that show / hide the panels
         self.layers_act = self._make_action("Layers", None, "layers",
                                             "Show / hide the layers panel (F7)", "F7")
         self.layers_act.setCheckable(True)
-        self.layers_act.toggled.connect(self.layers_panel.setVisible)
+        self.layers_act.toggled.connect(lambda on: self._show_side_panel(self.layers_panel, on))
+
+        self.results_act = self._make_action("Results", None, "results",
+                                             "Show / hide the detection results")
+        self.results_act.setCheckable(True)
+        self.results_act.toggled.connect(lambda on: self._show_side_panel(self.results_panel, on))
+        self.results_panel.closed.connect(lambda: self.results_act.setChecked(False))
 
         self.layers_panel.add_requested.connect(self.add_layer)
         self.layers_panel.delete_requested.connect(self.delete_layer)
@@ -633,6 +660,26 @@ class MainWindow(QMainWindow):
         self.layers_panel.visibility_changed.connect(self._on_layer_visibility_changed)
         self.layers_panel.opacity_changed.connect(self._on_layer_opacity_changed)
         self.layers_panel.renamed.connect(self._on_layer_renamed)
+
+    def _show_side_panel(self, panel, visible: bool) -> None:
+        """Show / hide one panel of the right column; hide the column when both are hidden."""
+        panel.setVisible(visible)
+        if panel is self.results_panel and not visible:
+            self.canvas.clear_selection()       # remove the face highlight with the results
+        self.side_column.setVisible(not self.layers_panel.isHidden()
+                                    or not self.results_panel.isHidden())
+
+    def _open_results(self) -> None:
+        if not self.results_act.isChecked():
+            self.results_act.setChecked(True)   # also shows the panel (toggled signal)
+
+    def _show_face(self, index: int) -> None:
+        """Frame the clicked face on the image and centre the view on it."""
+        if not (0 <= index < len(self._last_boxes)) or self.layers is None:
+            return
+        x1, y1, x2, y2 = self._last_boxes[index]
+        self.canvas.show_selection(QPointF(x1, y1), QPointF(x2, y2))
+        self.canvas.centerOn((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _refresh_layers_panel(self) -> None:
         if hasattr(self, "layers_panel"):
