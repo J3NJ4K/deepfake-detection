@@ -22,6 +22,7 @@ from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
 from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
+from ui.filter_dialog import FilterDialog
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -84,6 +85,10 @@ class MainWindow(QMainWindow):
         # Face detection and deepfake analysis run in a separate thread (window stays usable)
         self.analysis_task = BackgroundTask(self)
         self._analysis_size = None   # image size when the analysis started
+
+        # Last values chosen in the filter windows (re-used next time)
+        self.blur_radius = 2         # kernel size = 2 * radius + 1
+        self.threshold_value = 128
 
         # Initialisation UI
         self._create_actions()
@@ -223,11 +228,11 @@ class MainWindow(QMainWindow):
         self.resize_act = self._make_action("&Resize...", self.resize_image, "resize", "Resize the image")
 
         # --- Filters ---
-        self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur")
+        self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur (choose the strength)")
         self.sobel_act = self._make_action("Sobel", self.apply_sobel_filter, "sobel",
                                            "Sobel Filter (Edge Detection)")
         self.threshold_act = self._make_action("Threshold", self.apply_binary_threshold, "threshold",
-                                               "Binary Threshold (128)")
+                                               "Binary Threshold (choose the threshold)")
         self.otsu_act = self._make_action("Otsu", self.apply_histogram_threshold, "otsu",
                                           "Automatic Threshold (Otsu)")
 
@@ -275,49 +280,92 @@ class MainWindow(QMainWindow):
         menubar.addAction(self.undo_act)
         menubar.addAction(self.redo_act)
 
+    # ------------------------------------------------------------------
+    # Filters
+    # ------------------------------------------------------------------
+    def _ask_filter_value(self, make_image, title, label, minimum, maximum, value,
+                          suffix="", hint=""):
+        """
+        Open a FilterDialog with a live preview of make_image(value) on the active layer.
+        Returns the chosen value, or None if the user cancelled.
+        """
+        def show_preview(v):
+            try:
+                rgb = make_image(v)
+            except ValueError as error:
+                self.status_bar.showMessage(str(error), 3000)
+                return
+            self._show_image(self.layers.composite((rgb, self.layers.active_layer.alpha)))
+
+        dialog = FilterDialog(self, title, label, minimum, maximum, value, suffix, hint)
+        dialog.preview_requested.connect(show_preview)
+        dialog.preview_cleared.connect(self._update_display)
+        accepted = dialog.exec() == FilterDialog.DialogCode.Accepted
+        self._update_display()   # remove the preview (the real result is applied just after)
+        return dialog.value() if accepted else None
+
     def apply_gaussian_blur(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
+        def blurred(radius):
+            return gaussian_blur(self.current_image, kernel_size=2 * radius + 1)
+
+        radius = self._ask_filter_value(blurred, "Gaussian Blur", "Radius:", 1, 30,
+                                        self.blur_radius, " px",
+                                        "Bigger radius = stronger blur.")
+        if radius is None:
+            return
+        self.blur_radius = radius
         try:
-            self._set_image(gaussian_blur(self.current_image, kernel_size=5))
-            self.statusBar().showMessage("Gaussian Blur appliqué", 3000)
+            self._set_image(blurred(radius))
+            self.status_bar.showMessage(f"Gaussian Blur applied (radius {radius} px)", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur flou: {e}", 3000)
+            self.status_bar.showMessage(f"Error with Gaussian Blur: {e}", 3000)
 
     def apply_sobel_filter(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
         try:
             self._set_image(sobel_filter(self.current_image))
-            self.statusBar().showMessage("Filtre Sobel appliqué", 3000)
+            self.status_bar.showMessage("Sobel Filter applied", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur Sobel: {e}", 3000)
+            self.status_bar.showMessage(f"Error with Sobel filter: {e}", 3000)
 
     def apply_binary_threshold(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
+        def thresholded(value):
+            return binary_threshold(self.current_image, threshold=value)
+
+        value = self._ask_filter_value(thresholded, "Binary Threshold", "Threshold:", 0, 255,
+                                       self.threshold_value, "",
+                                       "Pixels brighter than the threshold become white, "
+                                       "the others black.")
+        if value is None:
+            return
+        self.threshold_value = value
         try:
-            self._set_image(binary_threshold(self.current_image, threshold=128))
-            self.statusBar().showMessage("Seuillage binaire appliqué", 3000)
+            self._set_image(thresholded(value))
+            self.status_bar.showMessage(f"Binary Threshold applied ({value})", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur seuillage: {e}", 3000)
+            self.status_bar.showMessage(f"Error with binary threshold: {e}", 3000)
 
     def apply_histogram_threshold(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
         try:
             self._set_image(histogram_threshold(self.current_image))
-            self.statusBar().showMessage("Seuillage Otsu appliqué", 3000)
+            self.status_bar.showMessage("Otsu Threshold applied (threshold chosen automatically)", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur Otsu: {e}", 3000)
+            self.status_bar.showMessage(f"Error with Otsu threshold: {e}", 3000)
 
     # ------------------------------------------------------------------
     # Detection (runs in the background)
