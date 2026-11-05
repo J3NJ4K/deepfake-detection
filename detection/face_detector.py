@@ -7,7 +7,6 @@ _detector = None
 
 
 def detect_faces(image: np.ndarray, score_threshold: float = 0.6) -> list[tuple[int, int, int, int]]:
-    """RGB uint8 in, list with (x1, y1, x2, y2) out."""
     # creates the detector once and reuses it, but updates the image size every time
     global _detector
     h, w = image.shape[:2]
@@ -16,7 +15,7 @@ def detect_faces(image: np.ndarray, score_threshold: float = 0.6) -> list[tuple[
         _detector = cv2.FaceDetectorYN.create(str(_MODEL_PATH), "", (w, h), score_threshold)
     _detector.setInputSize((w, h))
 
-    # YuNet expects BGR, and returns None (not an empty array) when no faces are found
+    # YuNet expects BGR, and returns None when no faces are found
     _, faces = _detector.detect(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
     if faces is None:
         return []
