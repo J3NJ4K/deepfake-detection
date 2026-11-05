@@ -50,12 +50,13 @@ def _tinted_svg_icon(path: str, color: QColor) -> QIcon:
     return icon
 
 
-def load_icon(name: str, color: QColor | None = None) -> QIcon | None:
+def load_icon(name: str, color: QColor | None = None, keep_colors: bool = False) -> QIcon | None:
     """
     Charge assets/<name>.svg (ou .png).
     Les SVG sont recolorés automatiquement avec la couleur du thème
     (blanc sur thème sombre, noir sur thème clair). On peut forcer une couleur
     avec `color`, par ex. load_icon("deepfake", QColor("red")).
+    keep_colors=True garde les couleurs d'origine du SVG (ex : la roue de couleurs).
     """
     # Si assets est à la racine du projet :
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,6 +64,8 @@ def load_icon(name: str, color: QColor | None = None) -> QIcon | None:
 
     svg_path = os.path.join(assets_dir, f"{name}.svg")
     if os.path.exists(svg_path):
+        if keep_colors:
+            return QIcon(svg_path)
         return _tinted_svg_icon(svg_path, color or _theme_icon_color())
 
     png_path = os.path.join(assets_dir, f"{name}.png")

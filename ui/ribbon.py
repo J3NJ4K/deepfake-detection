@@ -80,6 +80,10 @@ class RibbonGroup(QWidget):
             grid.addWidget(button, index % rows, index // rows)
         self._buttons_layout.addLayout(grid)
 
+    def add_widget(self, widget: QWidget) -> None:
+        """Put any widget in the group (e.g. the colour palette)."""
+        self._buttons_layout.addWidget(widget)
+
     def _make_button(self, action: QAction) -> QToolButton:
         button = QToolButton(self)
         button.setDefaultAction(action)
