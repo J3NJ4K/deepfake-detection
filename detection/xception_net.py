@@ -8,7 +8,6 @@ import torch.nn.functional as F
 
 
 class SeparableConv2d(nn.Module):
-    """Depthwise conv followed by a 1x1 pointwise conv (Xception's core building block)."""
 
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False):
         super().__init__()
@@ -21,7 +20,6 @@ class SeparableConv2d(nn.Module):
 
 
 class Block(nn.Module):
-    """Stack of separable convs with a residual (skip) connection."""
 
     def __init__(self, in_filters, out_filters, reps, strides=1, start_with_relu=True, grow_first=True):
         super().__init__()
