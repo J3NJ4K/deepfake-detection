@@ -226,11 +226,18 @@ venv/
 #Added by Marga
 .idea/
 
+
+
 #test images
 /test*.jpg
 /test*.png
 
+#Added by Sigrid
+gradcam_out.jpg
 faces_out.jpg
+test_gradcam.py
+obama.jpg
+obama2.jpg
 
 # Models (DeepfakeBench / Xception)
 models/xception_best.pth
