@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor
+from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor, QPalette
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 
 # Noms des outils (utilisés par la barre d'outils et par le canvas)
@@ -65,6 +65,13 @@ class ImageCanvas(QGraphicsView):
 
         self._brush_size = 5
         self.zoom_changed.connect(lambda _: self._update_cursor())
+
+        # Grey area around the image, so a white image stays visible in light mode (like Paint)
+        window = self.palette().color(QPalette.ColorRole.Window)
+        if window.lightness() > 128:      # light theme
+            self.setBackgroundBrush(QColor(204, 204, 204))
+        else:                             # dark theme
+            self.setBackgroundBrush(QColor(32, 32, 32))
 
         self._tool = TOOL_HAND
         self.set_tool(TOOL_HAND)

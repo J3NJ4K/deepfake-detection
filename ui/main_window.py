@@ -19,6 +19,7 @@ from ui.layers import LayerStack, overlay_from_drawing
 from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
+from ui.new_image_dialog import NewImageDialog
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -118,17 +119,17 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self):
         # --- File ---
-        self.new_act = self._make_action("&New...", self.new_image,
-                                         shortcut=QKeySequence.StandardKey.New)
-        self.open_act = self._make_action("&Open...", self.open_image,
-                                          shortcut=QKeySequence.StandardKey.Open)
+        self.new_act = self._make_action("&New...", self.new_image, "new", "New image (Ctrl+N)",
+                                         QKeySequence.StandardKey.New)
+        self.open_act = self._make_action("&Open...", self.open_image, "open", "Open an image (Ctrl+O)",
+                                          QKeySequence.StandardKey.Open)
         self.save_act = self._make_action("&Save", self.save_image, "disk", "Save (Ctrl+S)",
                                           QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
                                              "Save As (Ctrl+Shift+S)", QKeySequence.StandardKey.SaveAs)
         self.properties_act = self._make_action("&Properties...", self.show_properties)
-        self.quit_act = self._make_action("&Quit", self.close,
-                                          shortcut=QKeySequence.StandardKey.Quit)
+        self.quit_act = self._make_action("&Quit", self.close, "quit", "Quit",
+                                          QKeySequence.StandardKey.Quit)
 
         # --- History (Undo / Redo) ---
         self.undo_act = self._make_action("&Undo", self.undo, "undo", "Undo (Ctrl+Z)",
@@ -256,11 +257,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.quit_act)
 
-        edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction(self.undo_act)
-        edit_menu.addAction(self.redo_act)
-
-        # Undo / Redo also as icons right after the menus, like Paint (saves room in the ribbon)
+        # Undo / Redo as icons right after the File menu, like Paint (saves room in the ribbon)
         menubar.addAction(self.undo_act)
         menubar.addAction(self.redo_act)
 
@@ -642,14 +639,13 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Image: {w}x{h} px | Layers: {len(self.layers)}")
 
     def new_image(self) -> None:
-        width, ok = QInputDialog.getInt(self, "New image", "Width (px):", 800, 1, 10000)
-        if not ok:
+        # Window with the size (custom or preset formats) and the background colour
+        dialog = NewImageDialog(self)
+        if dialog.exec() != NewImageDialog.DialogCode.Accepted:
             return
-        height, ok = QInputDialog.getInt(self, "New image", "Height (px):", 600, 1, 10000)
-        if not ok:
-            return
+        width, height, color = dialog.values()
 
-        self.current_image = new_img(width, height)
+        self.current_image = new_img(width, height, color)
         self.current_file_path = None  # not saved yet -> Save will ask for a file name
         self.history.clear()
         self._update_undo_redo_state()
