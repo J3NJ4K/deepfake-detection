@@ -4,7 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout
+    QColorDialog, QHBoxLayout, QProgressBar
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
                            QGuiApplication)
@@ -21,6 +21,7 @@ from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
 from ui.new_image_dialog import NewImageDialog
+from ui.background_task import BackgroundTask
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -71,6 +72,18 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready - Open an image to start (Ctrl+O)")
+
+        # Moving bar shown in the status bar while an analysis runs in the background
+        self.busy_bar = QProgressBar()
+        self.busy_bar.setRange(0, 0)          # no percentage: just "working..."
+        self.busy_bar.setMaximumWidth(140)
+        self.busy_bar.setTextVisible(False)
+        self.busy_bar.hide()
+        self.status_bar.addPermanentWidget(self.busy_bar)
+
+        # Face detection and deepfake analysis run in a separate thread (window stays usable)
+        self.analysis_task = BackgroundTask(self)
+        self._analysis_size = None   # image size when the analysis started
 
         # Initialisation UI
         self._create_actions()
@@ -306,105 +319,122 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Erreur Otsu: {e}", 3000)
 
-    def run_face_detection(self):
+    # ------------------------------------------------------------------
+    # Detection (runs in the background)
+    # ------------------------------------------------------------------
+    def _start_analysis(self, func, on_done, message) -> bool:
+        """Start func(merged image) in the background. Returns False if it could not start."""
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return False
+        if self.analysis_task.is_running():
+            self.status_bar.showMessage("An analysis is already running, please wait...", 3000)
+            return False
+        image = self._composite().copy()       # what the user sees (all visible layers merged)
+        self._analysis_size = self.layers.size
+        self._set_analysis_running(True, message)
+        self.analysis_task.start(func, (image,), on_done, self._on_analysis_failed)
+        return True
+
+    def _set_analysis_running(self, running: bool, message: str = "") -> None:
+        self.face_detect_act.setEnabled(not running)
+        self.deepfake_act.setEnabled(not running)
+        self.busy_bar.setVisible(running)
+        if running:
+            self.status_bar.showMessage(message)
+
+    def _analysis_still_valid(self) -> bool:
+        """The boxes only make sense if the image was not resized / rotated / closed meanwhile."""
+        if self.layers is None or self.layers.size != self._analysis_size:
+            QMessageBox.warning(self, "Analysis", "The image changed size during the analysis, "
+                                                  "the result was not added. Please run it again.")
+            return False
+        return True
+
+    def _on_analysis_failed(self, error: str) -> None:
+        self._set_analysis_running(False)
+        self.status_bar.showMessage("Analysis failed.", 5000)
+        QMessageBox.critical(self, "Error", f"The analysis failed: {error}")
+
+    def run_face_detection(self):
+        self._start_analysis(detect_faces, self._on_faces_detected, "Detecting faces...")
+
+    def _on_faces_detected(self, boxes):
+        self._set_analysis_running(False)
+        if not self._analysis_still_valid():
+            return
+        if not boxes:
+            self.status_bar.showMessage("No faces detected.", 5000)
+            QMessageBox.information(self, "Face Detection", "No faces detected in the image.")
             return
 
-        try:
-            # Detect on what the user sees (all visible layers merged)
-            boxes = detect_faces(self._composite())
-            if not boxes:
-                QMessageBox.information(self, "Face Detection", "No faces detected in the image.")
-                return
+        def draw_boxes(image):
+            image = image.copy()
+            for (x1, y1, x2, y2) in boxes:
+                # Rectangle bleu (RGB: 0, 150, 255)
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 150, 255), 2)
+            return image
 
-            def draw_boxes(image):
-                image = image.copy()
-                for (x1, y1, x2, y2) in boxes:
-                    # Rectangle bleu (RGB: 0, 150, 255)
-                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 150, 255), 2)
-                return image
-
-            # The boxes go on their own layer: hide or delete it to get the clean photo back
-            self._add_overlay_layer("Faces", draw_boxes)
-            self.status_bar.showMessage(f"Detected {len(boxes)} face(s).")
-            QMessageBox.information(self, "Face Detection", f"Successfully detected {len(boxes)} face(s).")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to run face detection: {e}")
+        # The boxes go on their own layer: hide or delete it to get the clean photo back
+        self._add_overlay_layer("Faces", draw_boxes)
+        self.status_bar.showMessage(f"Detected {len(boxes)} face(s).", 5000)
 
     def run_deepfake_analysis(self):
-        if self.current_image is None:
-            QMessageBox.warning(self, "Warning", "Please open an image first.")
+        self._start_analysis(analyze_deepfake, self._on_deepfake_done,
+                             "Running deepfake analysis... (the first time, the model is loaded too)")
+
+    def _on_deepfake_done(self, results):
+        self._set_analysis_running(False)
+        if not self._analysis_still_valid():
+            return
+        if not results:
+            self.status_bar.showMessage("Analysis complete: No faces detected.", 5000)
+            QMessageBox.information(self, "Deepfake Detection", "No faces detected to analyze.")
             return
 
-        self.status_bar.showMessage("Running deepfake analysis...")
-        try:
-            # Analyse what the user sees (all visible layers merged)
-            results = analyze_deepfake(self._composite())
-            if not results:
-                QMessageBox.information(
-                    self, "Deepfake Detection", "No faces detected to analyze."
-                )
-                self.status_bar.showMessage("Analysis complete: No faces detected.")
-                return
+        summary_messages = []
+        for i, res in enumerate(results, start=1):
+            prob = res["manipulation_probability"]
+            verdict = "Manipulated (Fake)" if prob >= 0.5 else "Authentic (Real)"
+            summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
 
-            summary_messages = []
-            for i, res in enumerate(results, start=1):
+        def draw_results(image):
+            image = image.copy()
+            for res in results:
+                x1, y1, x2, y2 = res["bbox"]
                 prob = res["manipulation_probability"]
-                verdict = "Manipulated (Fake)" if prob >= 0.5 else "Authentic (Real)"
-                summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
+                is_fake = prob >= 0.5
 
-            def draw_results(image):
-                image = image.copy()
-                for res in results:
-                    x1, y1, x2, y2 = res["bbox"]
-                    prob = res["manipulation_probability"]
-                    is_fake = prob >= 0.5
+                # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
+                color = (255, 50, 50) if is_fake else (50, 205, 50)
+                label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
 
-                    # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
-                    color = (255, 50, 50) if is_fake else (50, 205, 50)
-                    label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
+                # Dessiner le cadre
+                cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
 
-                    # Dessiner le cadre
-                    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+                # Dessiner une étiquette texte au-dessus de la boîte
+                font_scale = 0.6
+                thickness = 2
+                (text_w, text_h), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+                )
+                # Fond plein sous le texte pour la lisibilité
+                cv2.rectangle(image, (x1, max(0, y1 - text_h - 10)), (x1 + text_w, y1), color, -1)
+                cv2.putText(image, label, (x1, max(text_h, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
+                            font_scale, (255, 255, 255), thickness, lineType=cv2.LINE_AA)
+            return image
 
-                    # Dessiner une étiquette texte au-dessus de la boîte
-                    font_scale = 0.6
-                    thickness = 2
-                    (text_w, text_h), baseline = cv2.getTextSize(
-                        label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-                    )
-                    # Fond plein sous le texte pour la lisibilité
-                    cv2.rectangle(
-                        image,
-                        (x1, max(0, y1 - text_h - 10)),
-                        (x1 + text_w, y1),
-                        color,
-                        -1,
-                    )
-                    cv2.putText(
-                        image,
-                        label,
-                        (x1, max(text_h, y1 - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        font_scale,
-                        (255, 255, 255),
-                        thickness,
-                        lineType=cv2.LINE_AA,
-                    )
-                return image
+        # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
+        self._add_overlay_layer("Deepfake analysis", draw_results)
 
-            # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
-            self._add_overlay_layer("Deepfake analysis", draw_results)
+        report = "\n".join(summary_messages)
+        self.status_bar.showMessage("Deepfake analysis complete.", 5000)
+        QMessageBox.information(self, "Deepfake Analysis Results", report)
 
-            report = "\n".join(summary_messages)
-            self.status_bar.showMessage("Deepfake analysis complete.")
-            QMessageBox.information(self, "Deepfake Analysis Results", report)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to run deepfake analysis: {e}")
-            self.status_bar.showMessage("Analysis failed.")
+    def closeEvent(self, event):
+        # Let a running analysis finish before the window (and its thread) is destroyed
+        self.analysis_task.wait()
+        super().closeEvent(event)
 
     def _add_overlay_layer(self, name, draw):
         """Put what draw(image) draws on a new transparent layer at the top."""
