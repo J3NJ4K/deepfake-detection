@@ -63,7 +63,21 @@ class ImageCanvas(QGraphicsView):
         self._selection_item.hide()
         self._scene.addItem(self._selection_item)
 
+        # Yellow frame used to show a face from the results panel
+        # (separate from the selection rectangle, which belongs to the Select tool)
+        self._highlight_item = QGraphicsRectItem()
+        highlight_pen = QPen(QColor(255, 200, 0), 3)
+        highlight_pen.setCosmetic(True)       # same thickness whatever the zoom
+        self._highlight_item.setPen(highlight_pen)
+        self._highlight_item.setZValue(2)
+        self._highlight_item.hide()
+        self._scene.addItem(self._highlight_item)
+
         self._brush_size = 5
+        self._grabbing = False
+        self.grab_check = None
+        self._hover_grab = False
+        self.viewport().setMouseTracking(True)
         self.zoom_changed.connect(lambda _: self._update_cursor())
 
         # Grey area around the image, so a white image stays visible in light mode (like Paint)
@@ -97,6 +111,7 @@ class ImageCanvas(QGraphicsView):
         self._update_cursor()
 
     def _update_cursor(self) -> None:
+        self._hover_grab = False
         if self._tool == TOOL_HAND:
             self.viewport().unsetCursor()
         elif self._tool == TOOL_ERASER:
@@ -127,7 +142,28 @@ class ImageCanvas(QGraphicsView):
     def _tool_active(self) -> bool:
         return self._tool != TOOL_HAND and not self._pixmap_item.pixmap().isNull()
 
+    def _over_selection(self, event: QMouseEvent) -> bool:
+        pos = self._image_pos(event)
+        if self._selection_item.isVisible() and self._selection_item.rect().contains(pos):
+            return True
+        return self.grab_check is not None and self.grab_check(pos)
+
+    def _set_hover_grab(self, grab: bool) -> None:
+        if grab != self._hover_grab:
+            self._hover_grab = grab
+            if grab:
+                self.viewport() .setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self._update_cursor()
+
     def mousePressEvent(self, event: QMouseEvent):
+        if (event.button() == Qt.MouseButton.LeftButton and self._tool in (TOOL_HAND, TOOL_SELECT)
+                and self._over_selection(event)):
+            self._grabbing = True
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.tool_pressed.emit(TOOL_SELECT, self._image_pos(event))
+            event.accept()
+            return
         if self._tool_active() and event.button() == Qt.MouseButton.LeftButton:
             self.tool_pressed.emit(self._tool, self._image_pos(event))
             event.accept()
@@ -135,6 +171,12 @@ class ImageCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._grabbing:
+            self.tool_dragged.emit(TOOL_SELECT, self._image_pos(event))
+            event.accept()
+            return
+        if event.buttons() == Qt.MouseButton.NoButton:
+            self._set_hover_grab(self._tool in (TOOL_HAND, TOOL_SELECT) and self._over_selection(event))
         if self._tool_active() and event.buttons() & Qt.MouseButton.LeftButton:
             self.tool_dragged.emit(self._tool, self._image_pos(event))
             event.accept()
@@ -142,6 +184,13 @@ class ImageCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._grabbing and event.button() == Qt.MouseButton.LeftButton:
+            self._grabbing = False
+            self.grab_check = None
+            self.tool_released.emit(TOOL_SELECT, self._image_pos(event))
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
         if self._tool_active() and event.button() == Qt.MouseButton.LeftButton:
             self.tool_released.emit(self._tool, self._image_pos(event))
             event.accept()
@@ -157,6 +206,13 @@ class ImageCanvas(QGraphicsView):
 
     def show_preview(self, pixmap: QPixmap) -> None:
         self._pixmap_item.setPixmap(pixmap)
+
+    def show_highlight(self, start: QPointF, end: QPointF) -> None:
+        self._highlight_item.setRect(QRectF(start, end).normalized())
+        self._highlight_item.show()
+
+    def clear_highlight(self) -> None:
+        self._highlight_item.hide()
 
     def clear_selection(self) -> None:
         self._selection_item.hide()

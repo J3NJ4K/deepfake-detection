@@ -27,9 +27,11 @@ from ui.results_panel import ResultsPanel
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
+from core.selection import selection_box, empty_region, paste_img
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
+from detection.gradcam import heatmap_layer
 from core.filters import (
     binary_threshold,
     gaussian_blur,
@@ -112,11 +114,12 @@ class MainWindow(QMainWindow):
         """Setting a whole new image (Open, New) starts a new document with one layer."""
         self.layers = None if image is None else LayerStack.from_image(image)
         self._displayed_size = None
+        self.deselect()
         self._refresh_layers_panel()
         if hasattr(self, "results_panel"):     # results of the previous image are not valid any more
             self._last_boxes = []
             self.results_panel.clear()
-            self.canvas.clear_selection()
+            self.canvas.clear_highlight()
 
     def _composite(self) -> np.ndarray | None:
         """The image as the user sees it: all visible layers merged."""
@@ -171,7 +174,8 @@ class MainWindow(QMainWindow):
         self.tool_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
 
         self.hand_tool_act = self._add_tool("Hand", TOOL_HAND, "hand", "Hand: drag to scroll the image when zoomed in")
-        self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select", "Select an area (coming soon)")
+        self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select",
+                                              "Select: drag to select an area, drag inside it to move it")
         self.crop_tool_act = self._add_tool("Crop", TOOL_CROP, "crop", "Crop: Drag a rectangle over the image")
         self.brush_tool_act = self._add_tool("Brush", TOOL_BRUSH, "brush", "Brush: drag to draw")
         self.eraser_tool_act = self._add_tool("Eraser", TOOL_ERASER, "eraser", "Eraser: drag to erase (change its size with Size button)")
@@ -209,9 +213,29 @@ class MainWindow(QMainWindow):
                                           "Size of the brush, eraser, lines and shape outlines")
         self.fill_color = (255, 255, 255)
         self.fill_color_act = self._make_action("Fill color", self.choose_fill_color, None, "Fill color for shapes")
+
+        # Clipboard
+        self._selection = None
+        self._select_start = None
+        self._move_start = None
+        self._lifted = None
+        self._floating = None
+        self._clipboard = None
+        self.cut_act = self._make_action("Cu&t", self.cut_selection, "cut", "Cut selected area (Ctrl+X)",
+                                         QKeySequence.StandardKey.Cut)
+        self.copy_act = self._make_action("&Copy", self.copy_selection, "copy", "Copy selected area (Ctrl+C)",
+                                          QKeySequence.StandardKey.Copy)
+        self.paste_act = self._make_action("&Paste", self.paste_clipboard, "paste",
+                                           "Paste image onto a new layer (Ctrl+V)", QKeySequence.StandardKey.Paste)
+        self.delete_sel_act = self._make_action("&Delete selection", self.delete_selection, None,
+                                                "Delete the selected area (Del)", QKeySequence.StandardKey.Delete)
+        self.select_all_act = self._make_action("Select &All", self.select_all, None,
+                                                "Select the entire image (Ctrl+A)", QKeySequence.StandardKey.SelectAll)
+        self.deselect_act = self._make_action("D&eselect", self.deselect, None, "Deselect (Esc)", "Esc")
         self._update_color_icon()
         self._update_size_icon()
         self._update_fill_icon()
+        self.canvas.grab_check = self._piece_at
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
@@ -254,6 +278,8 @@ class MainWindow(QMainWindow):
         else:
             self.hand_tool_act.setChecked(True)
             tool = TOOL_HAND
+        if tool not in (TOOL_SELECT, TOOL_HAND):
+            self.deselect()
         self.canvas.set_tool(tool)
         # Show the size / opacity bar only for the tools that use them
         self.tool_options.show_for_tool(tool in SIZE_TOOLS, tool in OPACITY_TOOLS)
@@ -281,7 +307,19 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.quit_act)
 
-        # Undo / Redo as icons right after the File menu, like Paint (saves room in the ribbon)
+        edit_menu = menubar.addMenu("&Edit")
+        edit_menu.addAction(self.undo_act)
+        edit_menu.addAction(self.redo_act)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.cut_act)
+        edit_menu.addAction(self.copy_act)
+        edit_menu.addAction(self.paste_act)
+        edit_menu.addAction(self.delete_sel_act)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.select_all_act)
+        edit_menu.addAction(self.deselect_act)
+
+        # Undo / Redo also as icons right after the menus, like Paint (saves room in the ribbon)
         menubar.addAction(self.undo_act)
         menubar.addAction(self.redo_act)
 
@@ -417,7 +455,7 @@ class MainWindow(QMainWindow):
         if not self._analysis_still_valid():
             return
         self._last_boxes = list(boxes)
-        self.canvas.clear_selection()
+        self.canvas.clear_highlight()
         self.results_panel.show_faces(boxes)
         self._open_results()
         if not boxes:
@@ -444,7 +482,7 @@ class MainWindow(QMainWindow):
         if not self._analysis_still_valid():
             return
         self._last_boxes = [res["bbox"] for res in results]
-        self.canvas.clear_selection()
+        self.canvas.clear_highlight()
         self.results_panel.show_deepfake(results)
         self._open_results()
         if not results:
@@ -477,6 +515,12 @@ class MainWindow(QMainWindow):
                             font_scale, (255, 255, 255), thickness, lineType=cv2.LINE_AA)
             return image
 
+        # Grad-CAM on its own layer below the boxes, stronger for more suspicious faces
+        height, width = self.layers.size
+        self._push_history()
+        self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(results, height, width))
+        self._after_edit()
+
         # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
         self._add_overlay_layer("Deepfake analysis", draw_results)
 
@@ -501,6 +545,10 @@ class MainWindow(QMainWindow):
         """Ruban en haut de la fenêtre, style Paint : un groupe par famille de fonctions."""
         self.ribbon = Ribbon(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.ribbon)
+
+        clipboard = self.ribbon.add_group("Clipboard")
+        clipboard.add_large_button(self.paste_act)
+        clipboard.add_small_buttons([self.cut_act, self.copy_act])
 
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
@@ -576,6 +624,7 @@ class MainWindow(QMainWindow):
     def undo(self) -> None:
         if self.layers is None:
             return
+        self.deselect()
         previous = self.history.undo(self.layers.snapshot())
         if previous is None:
             return
@@ -586,6 +635,7 @@ class MainWindow(QMainWindow):
     def redo(self) -> None:
         if self.layers is None:
             return
+        self.deselect()
         following = self.history.redo(self.layers.snapshot())
         if following is None:
             return
@@ -665,7 +715,7 @@ class MainWindow(QMainWindow):
         """Show / hide one panel of the right column; hide the column when both are hidden."""
         panel.setVisible(visible)
         if panel is self.results_panel and not visible:
-            self.canvas.clear_selection()       # remove the face highlight with the results
+            self.canvas.clear_highlight()       # remove the face highlight with the results
         self.side_column.setVisible(not self.layers_panel.isHidden()
                                     or not self.results_panel.isHidden())
 
@@ -678,7 +728,7 @@ class MainWindow(QMainWindow):
         if not (0 <= index < len(self._last_boxes)) or self.layers is None:
             return
         x1, y1, x2, y2 = self._last_boxes[index]
-        self.canvas.show_selection(QPointF(x1, y1), QPointF(x2, y2))
+        self.canvas.show_highlight(QPointF(x1, y1), QPointF(x2, y2))
         self.canvas.centerOn((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _refresh_layers_panel(self) -> None:
@@ -877,6 +927,7 @@ class MainWindow(QMainWindow):
 
         self._push_history()
         if operation in GEOMETRIC_OPS:
+            self.deselect()
             self.layers = new_stack
         else:
             self.layers.active_layer.rgb, self.layers.active_layer.alpha = rgb, alpha
@@ -904,6 +955,18 @@ class MainWindow(QMainWindow):
             self._pick_color(pos)
         elif tool == TOOL_FILL:
             self._fill_at(pos)
+        elif tool == TOOL_SELECT:
+            if self._inside_selection(pos):
+                self._begin_move(pos)
+            else:
+                self.deselect()
+                self._pick_layer_at(pos)
+                piece = self._piece_box_at(pos)
+                if piece is not None:
+                    self._set_selection(piece)
+                    self._begin_move(pos)
+                else:
+                    self._select_start = pos
 
     def _on_tool_dragged(self, tool, pos):
         if tool in SHAPE_TOOLS and self._shape_start is not None:
@@ -912,6 +975,10 @@ class MainWindow(QMainWindow):
             self.canvas.show_selection(self._crop_start, pos)
         elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
             self._continue_stroke(pos)
+        elif tool == TOOL_SELECT and self._lifted is not None:
+            self._preview_move(pos)
+        elif tool == TOOL_SELECT and self._select_start is not None:
+            self.canvas.show_selection(self._select_start, pos)
 
     def _on_tool_released(self, tool, pos):
         if tool in SHAPE_TOOLS and self._shape_start is not None:
@@ -921,6 +988,9 @@ class MainWindow(QMainWindow):
             return
         if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
             self._end_stroke()
+            return
+        if tool == TOOL_SELECT:
+            self._end_select(pos)
             return
         if tool != TOOL_CROP or self._crop_start is None:
             return
@@ -1163,6 +1233,217 @@ class MainWindow(QMainWindow):
             except ValueError:
                 return
         self._show_image(view)
+
+
+    # Select, Cut, Copy, Paste
+    def _set_selection(self, box) -> None:
+        self._selection = box
+        left, top, right, bottom = box
+        self.canvas.show_selection(QPointF(left, top), QPointF(right, bottom))
+
+    def deselect(self) -> None:
+        self._floating = None
+        self._selection = None
+        self._select_start = None
+        self.canvas.clear_selection()
+
+    def select_all(self) -> None:
+        if self.layers is None:
+            return
+        height, width = self.layers.size
+        self.select_tool_act.setChecked(True)
+        self._on_tool_clicked(self.select_tool_act)
+        self._set_selection((0, 0, width, height))
+
+    def _pick_layer_at(self, pos) -> None:
+        x, y = int(pos.x()), int(pos.y())
+        height, width = self.layers.size
+        if not (0 <= x < width and 0 <= y < height):
+            return
+        for index in range(len(self.layers) - 1, -1, -1):  # from the top layer down
+            layer = self.layers.layers[index]
+            if layer.visible and layer.opacity > 0 and layer.alpha[y, x] > 0:
+                if index != self.layers.active:
+                    self.layers.active = index
+                    self._refresh_layers_panel()
+                    self.status_bar.showMessage(f"Selecting area on: {layer.name}", 2000)
+                return
+                if self.layers.active != 0:
+                    self.layers.active = 0
+                    self._refresh_layers_panel()
+
+    def _piece_at(self, pos) -> bool:
+        if self.layers is None:
+            return False
+        x, y = int(pos.x()), int(pos.y())
+        height, width = self.layers.size
+        if not (0 <= x < width and 0 <= y < height):
+            return False
+        for layer in self.layers.layers[1:]:
+            if layer.visible and layer.opacity > 0 and layer.alpha[y, x] > 0:
+                return True
+        return False
+
+    def _piece_box_at(self, pos):
+        layer = self.layers.active_layer
+        x, y = int(pos.x()), int(pos.y())
+        height, width = self.layers.size
+        if self.layers.active == 0 or not (0 <= x < width and 0 <= y < height) or layer.alpha[y, x] == 0:
+            return None
+        rows = np.flatnonzero(layer.alpha.any(axis=1))
+        cols = np.flatnonzero(layer.alpha.any(axis=0))
+        return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
+
+    def _inside_selection(self, pos) -> bool:
+        if self._selection is None:
+            return False
+        left, top, right, bottom = self._selection
+        return left <= pos.x() < right and top <= pos.y() < bottom
+
+    def _end_select(self, pos) -> None:
+        if self._lifted is not None:
+            self._end_move(pos)
+            return
+        if self._select_start is None:
+            return
+        start, self._select_start = self._select_start, None
+        try:
+            box = selection_box(self.current_image, (start.x(), start.y(), pos.x(), pos.y()))
+        except ValueError:
+            self.deselect()
+            return
+        self._set_selection(box)
+        self.status_bar.showMessage(f"Area Selected {box[2] - box[0]}x{box[3] - box[1]} pixels "
+                                    "(Copy: Ctrl + C, Cut: Ctrl + X, or drag inside to move)", 4000)
+
+    @staticmethod
+    def _alpha3(alpha):
+        return np.dstack([alpha] * 3)
+
+    def _selected_pixels(self):
+        layer = self.layers.active_layer
+        rgb = crop(layer.rgb, self._selection)
+        alpha = crop(self._alpha3(layer.alpha), self._selection)[:, :, 0]
+        return rgb, alpha
+
+    def _layer_without_selection(self):
+        layer = self.layers.active_layer
+        rgb = empty_region(layer.rgb, self._selection, (255, 255, 255))
+        alpha = empty_region(self._alpha3(layer.alpha), self._selection, (0, 0, 0))[:, :, 0]
+        return rgb, alpha
+
+    def _begin_move(self, pos) -> None:
+        if self._floating is not None and self.layers.active_layer.rgb is self._floating[0]:
+            self._lifted, self._lift_origin = self._floating[1], self._floating[2]
+        else:
+            self._lift_origin = self._selection[:2]
+            piece_rgb, piece_alpha = self._selected_pixels()
+            base_rgb, base_alpha = self._layer_without_selection()
+            self._lifted = (piece_rgb, self._alpha3(piece_alpha), base_rgb, self._alpha3(base_alpha))
+        self._move_start = pos
+
+    def _moved_layer(self, pos):
+        piece_rgb, piece_alpha3, base_rgb, base_alpha3 = self._lifted
+        dx = int(round(pos.x() - self._move_start.x()))
+        dy = int(round(pos.y() - self._move_start.y()))
+        left, top = self._lift_origin[0] + dx, self._lift_origin[1] + dy
+        rgb = paste_img(base_rgb, piece_rgb, left, top)
+        alpha = np.ascontiguousarray(paste_img(base_alpha3, piece_alpha3, left, top)[:, :, 0])
+        return rgb, alpha, dx, dy
+
+    def _preview_move(self, pos) -> None:
+        rgb, alpha, dx, dy = self._moved_layer(pos)
+        self._show_image(self.layers.composite((rgb, alpha)))
+        left, top = self._lift_origin[0] + dx, self._lift_origin[1] + dy
+        piece_h, piece_w = self._lifted[0].shape[:2]
+        self.canvas.show_selection(QPointF(left, top), QPointF(left + piece_w, top + piece_h))
+
+    def _end_move(self, pos) -> None:
+        rgb, alpha, dx, dy = self._moved_layer(pos)
+        lifted, self._lifted = self._lifted, None
+        if dx == 0 and dy == 0:
+            self._set_selection(self._selection)
+            return
+        new_origin = (self._lift_origin[0] + dx, self._lift_origin[1] + dy)
+        piece_rgb, piece_alpha3, base_rgb, base_alpha3 = lifted
+
+        self._push_history()
+        layer = self.layers.active_layer
+        if self.layers.active == 0:
+            layer.rgb, layer.alpha = base_rgb, np.ascontiguousarray(base_alpha3[:, :, 0])
+            height, width = self.layers.size
+            empty = np.zeros((height, width, 3), np.uint8)
+            lifted = (piece_rgb, piece_alpha3, empty, empty)
+            rgb = paste_img(empty, piece_rgb, *new_origin)
+            alpha = np.ascontiguousarray(paste_img(empty, piece_alpha3, *new_origin)[:, :, 0])
+            layer = self.layers.add_layer("Piece")
+        layer.rgb, layer.alpha = rgb, alpha
+        self._after_edit()
+
+        # Remember the piece and where it is now, in case it is moved again
+        piece_h, piece_w = piece_rgb.shape[:2]
+        try:  # the selection follows the pixels (cut off at the image border)
+            self._set_selection(selection_box(rgb, (new_origin[0], new_origin[1],
+                                                    new_origin[0] + piece_w, new_origin[1] + piece_h)))
+            self._floating = (rgb, lifted, new_origin)
+        except ValueError:
+            self.deselect()  # moved completely outside the image
+    def _need_selection(self) -> bool:
+        if self.layers is None or self._selection is None:
+            self.status_bar.showMessage("Choose an area using the Select Tool", 3000)
+            return False
+        return True
+
+    def copy_selection(self) -> None:
+        if not self._need_selection():
+            return
+        self._clipboard = self._selected_pixels()
+        self._clipboard_pos = self._selection[:2]
+        height, width = self._clipboard[1].shape
+        self.status_bar.showMessage(f"Copied area: {width}x{height} pixels", 3000)
+
+    def delete_selection(self) -> None:
+        if not self._need_selection():
+            return
+        rgb, alpha = self._layer_without_selection()
+        self._push_history()
+        self.layers.active_layer.rgb, self.layers.active_layer.alpha = rgb, alpha
+        self.deselect()
+        self._after_edit()
+
+    def cut_selection(self) -> None:
+        if not self._need_selection():
+            return
+        self.copy_selection()
+        self.delete_selection()
+        self.status_bar.showMessage("Cut", 3000)
+
+    def paste_clipboard(self) -> None:
+        if self.layers is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return
+        if self._clipboard is None:
+            self.status_bar.showMessage("Nothing to paste. Copy an area first (Ctrl+C)", 3000)
+            return
+        piece_rgb, piece_alpha = self._clipboard
+        left, top = self._selection[:2] if self._selection is not None else self._clipboard_pos
+        height, width = self.layers.size
+        rgb = paste_img(np.zeros((height, width, 3), np.uint8), piece_rgb, left, top)
+        alpha = paste_img(np.zeros((height, width, 3), np.uint8), self._alpha3(piece_alpha), left, top)
+
+        self._push_history()
+        layer = self.layers.add_layer("Pasted")
+        layer.rgb, layer.alpha = rgb, np.ascontiguousarray(alpha[:, :, 0])
+        self._after_edit()
+
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+        piece_h, piece_w = piece_alpha.shape
+        try:
+            self._set_selection(selection_box(rgb, (left, top, left + piece_w, top + piece_h)))
+        except ValueError:
+            self.deselect()
+        self.status_bar.showMessage("New layer created. Drag to move the image", 4000)
 
 
     def resize_image(self):
