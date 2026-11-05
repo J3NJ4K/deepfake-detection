@@ -181,7 +181,6 @@ class ImageCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self._grabbing and event.button() == Qt.MouseButton.LeftButton:
             self._grabbing = False
-            self.grab_check = None
             self.tool_released.emit(TOOL_SELECT, self._image_pos(event))
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()

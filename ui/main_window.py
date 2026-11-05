@@ -524,6 +524,9 @@ class MainWindow(QMainWindow):
                                  self.eraser_tool_act, self.picker_tool_act,
                                  self.fill_tool_act])
 
+        cut_out = self.ribbon.add_group("Cut out")
+        cut_out.add_large_button(self.cut_faces_act)
+
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
                                   self.line_tool_act, self.triangle_tool_act,
@@ -545,7 +548,6 @@ class MainWindow(QMainWindow):
 
         detection = self.ribbon.add_group("Detection")
         detection.add_large_button(self.face_detect_act)
-        detection.add_large_button(self.cut_faces_act)
         detection.add_large_button(self.deepfake_act)
 
     def _on_palette_color(self, slot, rgb):
