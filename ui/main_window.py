@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
     QColorDialog, QHBoxLayout
 )
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette
+from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
+                           QGuiApplication)
 from PySide6.QtCore import Qt, QSize
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
@@ -805,8 +806,34 @@ class MainWindow(QMainWindow):
 
     def _draw_current_shape(self, image, tool, end):
         start = (self._shape_start.x(), self._shape_start.y())
-        return draw_shape(image, tool, start, (end.x(), end.y()),
-                          self.brush_color, self.brush_size)
+        end = self._shape_end(tool, start, (end.x(), end.y()))
+        return draw_shape(image, tool, start, end, self.brush_color, self.brush_size)
+
+    def _shape_end(self, tool, start, end):
+        """
+        End point of a shape. While Shift is held, the shape is kept "perfect":
+        square / circle / regular star..., equilateral triangle, and lines snapped
+        to horizontal, vertical or 45°.
+        """
+        if not QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            return end
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        sign_x = 1 if dx >= 0 else -1
+        sign_y = 1 if dy >= 0 else -1
+
+        if tool == TOOL_LINE:
+            if abs(dy) < 0.414 * abs(dx):        # less than 22.5°: horizontal
+                return (end[0], start[1])
+            if abs(dx) < 0.414 * abs(dy):        # more than 67.5°: vertical
+                return (start[0], end[1])
+            d = max(abs(dx), abs(dy))            # otherwise: 45° diagonal
+            return (start[0] + sign_x * d, start[1] + sign_y * d)
+
+        d = max(abs(dx), abs(dy))
+        if tool == TOOL_TRIANGLE:
+            # Equilateral triangle: height = width * sqrt(3) / 2
+            return (start[0] + sign_x * d, start[1] + sign_y * d * 0.866)
+        return (start[0] + sign_x * d, start[1] + sign_y * d)
 
     def _show_image(self, image):
         self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(image)))
@@ -991,7 +1018,7 @@ class MainWindow(QMainWindow):
             self._shape_view = self._composite()
         height, width = self.layers.size
         sx, sy = self._shape_start.x(), self._shape_start.y()
-        ex, ey = pos.x(), pos.y()
+        ex, ey = self._shape_end(tool, (sx, sy), (pos.x(), pos.y()))
         margin = self.brush_size + 3
         x0 = max(0, int(min(sx, ex)) - margin)
         x1 = min(width, int(max(sx, ex)) + margin + 1)

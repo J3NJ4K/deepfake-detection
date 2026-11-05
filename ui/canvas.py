@@ -171,7 +171,22 @@ class ImageCanvas(QGraphicsView):
         self.fit_to_window()
 
     def wheelEvent(self, event: QWheelEvent):
-        """Désactive le zoom par molette et laisse le défilement standard."""
+        """Ctrl + molette : zoom centré sur la souris. Sans Ctrl : défilement normal."""
+        if (event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and not self._pixmap_item.pixmap().isNull()):
+            steps = event.angleDelta().y() / 120   # one notch of the wheel = 120
+            if steps:
+                cursor = event.position().toPoint()
+                before = self.mapToScene(cursor)               # image point under the mouse
+                self.apply_zoom(self._current_zoom * (1.25 ** steps))
+                after = self.mapToScene(cursor)
+                # Scroll so that the same image point stays under the mouse
+                shift = (before - after) * self._current_zoom
+                h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+                h.setValue(h.value() + round(shift.x()))
+                v.setValue(v.value() + round(shift.y()))
+            event.accept()
+            return
         super().wheelEvent(event)
 
     def apply_zoom(self, zoom_value: float):
