@@ -4,7 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout
+    QColorDialog, QHBoxLayout, QApplication
 )
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette
 from PySide6.QtCore import Qt, QSize, QPointF
@@ -22,7 +22,8 @@ from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
-from core.selection import selection_box, empty_region, paste_img
+from core.selection import (selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask,
+                            smart_cut_mask)
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake
@@ -243,11 +244,12 @@ class MainWindow(QMainWindow):
         # --- Detection ---
         self.face_detect_act = self._make_action("Faces", self.run_face_detection, "face",
                                                  "Detect Faces")
+        self.cut_faces_act = self._make_action("Cut faces", self.cut_faces, "smart_cut",
+                                               "Cut out every face as a sticker you can drag")
         self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, "deepfake",
                                               "Run Deepfake Analysis")
 
     def _on_tool_clicked(self, action):
-        """Switch to the clicked tool, or back to the Hand if the active tool was clicked again."""
         if action.isChecked():
             tool = action.data()
         else:
@@ -448,6 +450,46 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to run deepfake analysis: {e}")
             self.status_bar.showMessage("Analysis failed.")
 
+    def cut_faces(self):
+        if self.layers is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return
+        self.status_bar.showMessage("Cutting out faces...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            image = self._composite()  # what the user sees
+            masks = []
+            for (x1, y1, x2, y2) in detect_faces(image):
+                w, h = x2 - x1, y2 - y1
+                box = (x1 - 0.3 * w, y1 - 0.5 * h, x2 + 0.3 * w, y2 + 0.2 * h)
+                try:
+                    masks.append(smart_cut_mask(image, box)[0])
+                except ValueError:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to cut out faces: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not masks:
+            QMessageBox.information(self, "Cut faces", "No faces found in the image.")
+            return
+
+        self._push_history()
+        self.deselect()
+        photo = self.layers.layers[0]
+        height, width = self.layers.size
+        for number, mask in enumerate(masks, start=1):
+            face = paste_img(np.zeros((height, width, 3), np.uint8), image, 0, 0, mask)
+            self.layers.add_layer_on_top(f"Face {number}", face, mask)
+            photo.rgb = fill_mask(photo.rgb, mask, (255, 255, 255))
+            photo.alpha = fill_mask(self._alpha3(photo.alpha), mask, (0, 0, 0))[:, :, 0]
+        self._after_edit()
+
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+        self.status_bar.showMessage(f"Cut out {len(masks)} face(s): drag them with the Hand", 5000)
+
     def _add_overlay_layer(self, name, draw):
         """Put what draw(image) draws on a new transparent layer at the top."""
         height, width = self.layers.size
@@ -498,6 +540,7 @@ class MainWindow(QMainWindow):
 
         detection = self.ribbon.add_group("Detection")
         detection.add_large_button(self.face_detect_act)
+        detection.add_large_button(self.cut_faces_act)
         detection.add_large_button(self.deepfake_act)
 
     def _on_palette_color(self, slot, rgb):
