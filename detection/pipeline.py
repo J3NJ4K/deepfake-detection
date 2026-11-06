@@ -30,7 +30,7 @@ def analyze_deepfake(image: np.ndarray) -> dict:
             "crop_box": crop_box(image, bbox),
         })
 
-    # UnivFD only on the whole image, it is trained on whole images and gave false positives on face crops
+    # commfor only on the whole image
     return {
         "generated_probability": predict_commfor(_commfor, to_commfor_tensor(image)),
         "faces": faces,
