@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QSize, QPointF
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
                        TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
-                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
+                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW, TOOL_LASSO)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
@@ -27,10 +27,10 @@ from ui.results_panel import ResultsPanel
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
-from core.selection import selection_box, empty_region, paste_img
+from core.selection import selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
-from detection.pipeline import analyze_deepfake
+from detection.pipeline import analyze_deepfake, GENERATED_THRESHOLD
 from detection.gradcam import heatmap_layer
 from core.filters import (
     binary_threshold,
@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         # Face detection and deepfake analysis run in a separate thread (window stays usable)
         self.analysis_task = BackgroundTask(self)
         self._analysis_size = None   # image size when the analysis started
+        self._deepfake_ran = False   # the first analysis also downloads / loads the models
 
         # Last values chosen in the filter windows (re-used next time)
         self.blur_radius = 2         # kernel size = 2 * radius + 1
@@ -176,6 +177,8 @@ class MainWindow(QMainWindow):
         self.hand_tool_act = self._add_tool("Hand", TOOL_HAND, "hand", "Hand: drag to scroll the image when zoomed in")
         self.select_tool_act = self._add_tool("Select", TOOL_SELECT, "select",
                                               "Select: drag to select an area, drag inside it to move it")
+        self.lasso_tool_act = self._add_tool("Lasso", TOOL_LASSO, "lasso",
+                                             "Lasso: draw around something to cut out its shape, drag inside it to move it")
         self.crop_tool_act = self._add_tool("Crop", TOOL_CROP, "crop", "Crop: Drag a rectangle over the image")
         self.brush_tool_act = self._add_tool("Brush", TOOL_BRUSH, "brush", "Brush: drag to draw")
         self.eraser_tool_act = self._add_tool("Eraser", TOOL_ERASER, "eraser", "Eraser: drag to erase (change its size with Size button)")
@@ -216,6 +219,9 @@ class MainWindow(QMainWindow):
 
         # Clipboard
         self._selection = None
+        self._selection_mask = None
+        self._selection_points = None
+        self._lasso_points = None
         self._select_start = None
         self._move_start = None
         self._lifted = None
@@ -278,7 +284,7 @@ class MainWindow(QMainWindow):
         else:
             self.hand_tool_act.setChecked(True)
             tool = TOOL_HAND
-        if tool not in (TOOL_SELECT, TOOL_HAND):
+        if tool not in (TOOL_SELECT, TOOL_HAND, TOOL_LASSO):
             self.deselect()
         self.canvas.set_tool(tool)
         # Show the size / opacity bar only for the tools that use them
@@ -445,7 +451,13 @@ class MainWindow(QMainWindow):
     def _on_analysis_failed(self, error: str) -> None:
         self._set_analysis_running(False)
         self.status_bar.showMessage("Analysis failed.", 5000)
-        QMessageBox.critical(self, "Error", f"The analysis failed: {error}")
+        hint = ""
+        if "models" in error or ".pth" in error or ".onnx" in error:
+            hint = "\n\nA model file seems to be missing: see the README (section about the models/ folder)."
+        elif "huggingface" in error.lower() or "connection" in error.lower():
+            hint = ("\n\nThe first analysis downloads the CLIP model (~1.7 GB) from Hugging Face: "
+                    "check your internet connection and try again.")
+        QMessageBox.critical(self, "Error", f"The analysis failed: {error}{hint}")
 
     def run_face_detection(self):
         self._start_analysis(detect_faces, self._on_faces_detected, "Detecting faces...")
@@ -474,24 +486,40 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Detected {len(boxes)} face(s).", 5000)
 
     def run_deepfake_analysis(self):
-        self._start_analysis(analyze_deepfake, self._on_deepfake_done,
-                             "Running deepfake analysis... (the first time, the model is loaded too)")
+        if self._deepfake_ran:
+            message = "Running deepfake analysis..."
+        else:
+            # First time: CLIP (~1.7 GB) is downloaded from the internet, then both models are loaded
+            message = ("Running deepfake analysis... First time: downloading and loading the models "
+                       "(CLIP, about 1.7 GB), this can take several minutes.")
+        self._start_analysis(analyze_deepfake, self._on_deepfake_done, message)
 
     def _on_deepfake_done(self, results):
+        """
+        results = {"generated_probability": float,   # whole image is AI-generated (UnivFD)
+                   "faces": [ {bbox, manipulation_probability, heatmap, crop_box}, ... ]}  # Xception
+        """
+        self._deepfake_ran = True
         self._set_analysis_running(False)
         if not self._analysis_still_valid():
             return
-        self._last_boxes = [res["bbox"] for res in results]
+        generated = results["generated_probability"]
+        faces = results["faces"]
+        self._last_boxes = [face["bbox"] for face in faces]
         self.canvas.clear_highlight()
-        self.results_panel.show_deepfake(results)
+        self.results_panel.show_deepfake(faces, generated, GENERATED_THRESHOLD)
         self._open_results()
-        if not results:
-            self.status_bar.showMessage("Analysis complete: No faces detected.", 5000)
+
+        image_verdict = "likely AI-generated" if generated >= GENERATED_THRESHOLD else "likely not AI-generated"
+        if not faces:
+            # No face: the whole-image score is still shown, but there is nothing to draw
+            self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
+                                        f"no faces found.", 8000)
             return
 
         def draw_results(image):
             image = image.copy()
-            for res in results:
+            for res in faces:
                 x1, y1, x2, y2 = res["bbox"]
                 prob = res["manipulation_probability"]
                 is_fake = prob >= 0.5
@@ -518,15 +546,15 @@ class MainWindow(QMainWindow):
         # Grad-CAM on its own layer below the boxes, stronger for more suspicious faces
         height, width = self.layers.size
         self._push_history()
-        self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(results, height, width))
+        self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(faces, height, width))
         self._after_edit()
 
         # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
         self._add_overlay_layer("Deepfake analysis", draw_results)
 
-        fakes = sum(res["manipulation_probability"] >= 0.5 for res in results)
-        self.status_bar.showMessage(f"Deepfake analysis complete: {len(results)} face(s), "
-                                    f"{fakes} likely fake.", 5000)
+        fakes = sum(face["manipulation_probability"] >= 0.5 for face in faces)
+        self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
+                                    f"{len(faces)} face(s), {fakes} likely manipulated.", 8000)
 
     def closeEvent(self, event):
         # Let a running analysis finish before the window (and its thread) is destroyed
@@ -558,7 +586,7 @@ class MainWindow(QMainWindow):
 
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
-                                 self.crop_tool_act, self.brush_tool_act,
+                                 self.lasso_tool_act, self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act, self.picker_tool_act,
                                  self.fill_tool_act])
 
@@ -955,7 +983,7 @@ class MainWindow(QMainWindow):
             self._pick_color(pos)
         elif tool == TOOL_FILL:
             self._fill_at(pos)
-        elif tool == TOOL_SELECT:
+        elif tool in (TOOL_SELECT, TOOL_LASSO):
             if self._inside_selection(pos):
                 self._begin_move(pos)
             else:
@@ -965,6 +993,8 @@ class MainWindow(QMainWindow):
                 if piece is not None:
                     self._set_selection(piece)
                     self._begin_move(pos)
+                elif tool == TOOL_LASSO:
+                    self._lasso_points = [(pos.x(), pos.y())]
                 else:
                     self._select_start = pos
 
@@ -975,8 +1005,12 @@ class MainWindow(QMainWindow):
             self.canvas.show_selection(self._crop_start, pos)
         elif tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
             self._continue_stroke(pos)
-        elif tool == TOOL_SELECT and self._lifted is not None:
+        elif tool in (TOOL_SELECT, TOOL_LASSO) and self._lifted is not None:
             self._preview_move(pos)
+        elif tool == TOOL_LASSO and self._lasso_points is not None:
+            if (pos.x(), pos.y()) != self._lasso_points[-1]:
+                self._lasso_points.append((pos.x(), pos.y()))
+            self.canvas.show_lasso([QPointF(x, y) for x, y in self._lasso_points])
         elif tool == TOOL_SELECT and self._select_start is not None:
             self.canvas.show_selection(self._select_start, pos)
 
@@ -991,6 +1025,12 @@ class MainWindow(QMainWindow):
             return
         if tool == TOOL_SELECT:
             self._end_select(pos)
+            return
+        if tool == TOOL_LASSO:
+            if self._lifted is not None:
+                self._end_move(pos)
+            else:
+                self._end_lasso()
             return
         if tool != TOOL_CROP or self._crop_start is None:
             return
@@ -1236,14 +1276,22 @@ class MainWindow(QMainWindow):
 
 
     # Select, Cut, Copy, Paste
-    def _set_selection(self, box) -> None:
+    def _set_selection(self, box, mask=None, points=None) -> None:
         self._selection = box
-        left, top, right, bottom = box
-        self.canvas.show_selection(QPointF(left, top), QPointF(right, bottom))
+        self._selection_mask = mask
+        self._selection_points = points
+        if points is not None:
+            self.canvas.show_lasso([QPointF(x, y) for x, y in points])
+        else:
+            left, top, right, bottom = box
+            self.canvas.show_selection(QPointF(left, top), QPointF(right, bottom))
 
     def deselect(self) -> None:
         self._floating = None
         self._selection = None
+        self._selection_mask = None
+        self._selection_points = None
+        self._lasso_points = None
         self._select_start = None
         self.canvas.clear_selection()
 
@@ -1268,9 +1316,9 @@ class MainWindow(QMainWindow):
                     self._refresh_layers_panel()
                     self.status_bar.showMessage(f"Selecting area on: {layer.name}", 2000)
                 return
-                if self.layers.active != 0:
-                    self.layers.active = 0
-                    self._refresh_layers_panel()
+        if self.layers.active != 0:
+                self.layers.active = 0
+                self._refresh_layers_panel()
 
     def _piece_at(self, pos) -> bool:
         if self.layers is None:
@@ -1298,7 +1346,11 @@ class MainWindow(QMainWindow):
         if self._selection is None:
             return False
         left, top, right, bottom = self._selection
-        return left <= pos.x() < right and top <= pos.y() < bottom
+        if not (left <= pos.x() < right and top <= pos.y() < bottom):
+            return False
+        if self._selection_mask is not None:
+            return bool(self._selection_mask[int(pos.y()), int(pos.x())])
+        return True
 
     def _end_select(self, pos) -> None:
         if self._lifted is not None:
@@ -1316,6 +1368,18 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Area Selected {box[2] - box[0]}x{box[3] - box[1]} pixels "
                                     "(Copy: Ctrl + C, Cut: Ctrl + X, or drag inside to move)", 4000)
 
+    def _end_lasso(self) -> None:
+        points, self._lasso_points = self._lasso_points, None
+        if points is None:
+            return
+        try:
+            mask = lasso_mask(self.current_image, points)
+        except ValueError:
+            self.deselect()  # just a click or a line: nothing selected
+            return
+        self._set_selection(mask_box(mask), mask, points)
+        self.status_bar.showMessage("Shape selected (Ctrl+C copy, Ctrl+X cut, drag inside to move)", 4000)
+
     @staticmethod
     def _alpha3(alpha):
         return np.dstack([alpha] * 3)
@@ -1324,10 +1388,17 @@ class MainWindow(QMainWindow):
         layer = self.layers.active_layer
         rgb = crop(layer.rgb, self._selection)
         alpha = crop(self._alpha3(layer.alpha), self._selection)[:, :, 0]
+        if self._selection_mask is not None:
+            inside = crop(self._alpha3(self._selection_mask), self._selection)[:, :, 0]
+            alpha = np.where(inside > 0, alpha, 0).astype(np.uint8)
         return rgb, alpha
 
     def _layer_without_selection(self):
         layer = self.layers.active_layer
+        if self._selection_mask is not None:
+            rgb = fill_mask(layer.rgb, self._selection_mask, (255, 255, 255))
+            alpha = fill_mask(self._alpha3(layer.alpha), self._selection_mask, (0, 0, 0))[:, :, 0]
+            return rgb, alpha
         rgb = empty_region(layer.rgb, self._selection, (255, 255, 255))
         alpha = empty_region(self._alpha3(layer.alpha), self._selection, (0, 0, 0))[:, :, 0]
         return rgb, alpha
@@ -1347,13 +1418,17 @@ class MainWindow(QMainWindow):
         dx = int(round(pos.x() - self._move_start.x()))
         dy = int(round(pos.y() - self._move_start.y()))
         left, top = self._lift_origin[0] + dx, self._lift_origin[1] + dy
-        rgb = paste_img(base_rgb, piece_rgb, left, top)
-        alpha = np.ascontiguousarray(paste_img(base_alpha3, piece_alpha3, left, top)[:, :, 0])
+        shape = piece_alpha3[:, :, 0]
+        rgb = paste_img(base_rgb, piece_rgb, left, top, shape)
+        alpha = np.ascontiguousarray(paste_img(base_alpha3, piece_alpha3, left, top, shape)[:, :, 0])
         return rgb, alpha, dx, dy
 
     def _preview_move(self, pos) -> None:
         rgb, alpha, dx, dy = self._moved_layer(pos)
         self._show_image(self.layers.composite((rgb, alpha)))
+        if self._selection_points is not None:
+            self.canvas.show_lasso([QPointF(x + dx, y + dy) for x, y in self._selection_points])
+            return
         left, top = self._lift_origin[0] + dx, self._lift_origin[1] + dy
         piece_h, piece_w = self._lifted[0].shape[:2]
         self.canvas.show_selection(QPointF(left, top), QPointF(left + piece_w, top + piece_h))
@@ -1374,20 +1449,26 @@ class MainWindow(QMainWindow):
             height, width = self.layers.size
             empty = np.zeros((height, width, 3), np.uint8)
             lifted = (piece_rgb, piece_alpha3, empty, empty)
-            rgb = paste_img(empty, piece_rgb, *new_origin)
-            alpha = np.ascontiguousarray(paste_img(empty, piece_alpha3, *new_origin)[:, :, 0])
+            rgb = paste_img(empty, piece_rgb, *new_origin, piece_alpha3[:, :, 0])
+            alpha = np.ascontiguousarray(paste_img(empty, piece_alpha3, *new_origin, piece_alpha3[:, :, 0])[:, :, 0])
             layer = self.layers.add_layer("Piece")
         layer.rgb, layer.alpha = rgb, alpha
         self._after_edit()
 
-        # Remember the piece and where it is now, in case it is moved again
         piece_h, piece_w = piece_rgb.shape[:2]
-        try:  # the selection follows the pixels (cut off at the image border)
-            self._set_selection(selection_box(rgb, (new_origin[0], new_origin[1],
-                                                    new_origin[0] + piece_w, new_origin[1] + piece_h)))
+        try:
+            if self._selection_points is not None:
+                # Lasso: the shape moves with the piece
+                points = [(x + dx, y + dy) for x, y in self._selection_points]
+                height, width = self.layers.size
+                mask = paste_img(np.zeros((height, width, 3), np.uint8), piece_alpha3, *new_origin)[:, :, 0]
+                self._set_selection(mask_box(mask), mask, points)
+            else:
+                self._set_selection(selection_box(rgb, (new_origin[0], new_origin[1],
+                                                        new_origin[0] + piece_w, new_origin[1] + piece_h)))
             self._floating = (rgb, lifted, new_origin)
         except ValueError:
-            self.deselect()  # moved completely outside the image
+            self.deselect()
     def _need_selection(self) -> bool:
         if self.layers is None or self._selection is None:
             self.status_bar.showMessage("Choose an area using the Select Tool", 3000)

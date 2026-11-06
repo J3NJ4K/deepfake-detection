@@ -1,5 +1,6 @@
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor, QPalette
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsPathItem
+from PySide6.QtGui import (QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor,
+                           QPainterPath, QPolygonF, QPalette)
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 
 # Noms des outils (utilisés par la barre d'outils et par le canvas)
@@ -18,6 +19,7 @@ TOOL_RIGHT_TRIANGLE = "right_triangle"
 TOOL_DIAMOND = "diamond"
 TOOL_STAR = "star"
 TOOL_ARROW = "arrow"
+TOOL_LASSO = "lasso"
 
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
@@ -62,6 +64,13 @@ class ImageCanvas(QGraphicsView):
         self._selection_item.setZValue(1)
         self._selection_item.hide()
         self._scene.addItem(self._selection_item)
+
+        self._lasso_item = QGraphicsPathItem()
+        self._lasso_item.setPen(pen)
+        self._lasso_item.setBrush(QColor(0, 120, 215, 60))
+        self._lasso_item.setZValue(1)
+        self._lasso_item.hide()
+        self._scene.addItem(self._lasso_item)
 
         # Yellow frame used to show a face from the results panel
         # (separate from the selection rectangle, which belongs to the Select tool)
@@ -144,7 +153,10 @@ class ImageCanvas(QGraphicsView):
 
     def _over_selection(self, event: QMouseEvent) -> bool:
         pos = self._image_pos(event)
-        if self._selection_item.isVisible() and self._selection_item.rect().contains(pos):
+        if self._lasso_item.isVisible():
+            if self._lasso_item.path().contains(pos):
+                return True
+        elif self._selection_item.isVisible() and self._selection_item.rect().contains(pos):
             return True
         return self.grab_check is not None and self.grab_check(pos)
 
@@ -157,7 +169,7 @@ class ImageCanvas(QGraphicsView):
                 self._update_cursor()
 
     def mousePressEvent(self, event: QMouseEvent):
-        if (event.button() == Qt.MouseButton.LeftButton and self._tool in (TOOL_HAND, TOOL_SELECT)
+        if (event.button() == Qt.MouseButton.LeftButton and self._tool in (TOOL_HAND, TOOL_SELECT, TOOL_LASSO)
                 and self._over_selection(event)):
             self._grabbing = True
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -176,7 +188,7 @@ class ImageCanvas(QGraphicsView):
             event.accept()
             return
         if event.buttons() == Qt.MouseButton.NoButton:
-            self._set_hover_grab(self._tool in (TOOL_HAND, TOOL_SELECT) and self._over_selection(event))
+            self._set_hover_grab(self._tool in (TOOL_HAND, TOOL_SELECT, TOOL_LASSO) and self._over_selection(event))
         if self._tool_active() and event.buttons() & Qt.MouseButton.LeftButton:
             self.tool_dragged.emit(self._tool, self._image_pos(event))
             event.accept()
@@ -203,6 +215,15 @@ class ImageCanvas(QGraphicsView):
         rect = rect.intersected(self._pixmap_item.boundingRect())  # keep it inside the image
         self._selection_item.setRect(rect)
         self._selection_item.show()
+        self._lasso_item.hide()
+
+    def show_lasso(self, points) -> None:
+        path = QPainterPath()
+        path.addPolygon(QPolygonF(points))
+        path.closeSubpath()
+        self._lasso_item.setPath(path)
+        self._lasso_item.show()
+        self._selection_item.hide()
 
     def show_preview(self, pixmap: QPixmap) -> None:
         self._pixmap_item.setPixmap(pixmap)
@@ -216,6 +237,7 @@ class ImageCanvas(QGraphicsView):
 
     def clear_selection(self) -> None:
         self._selection_item.hide()
+        self._lasso_item.hide()
 
     # ------------------------------------------------------------------
     # Affichage et zoom
