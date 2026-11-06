@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem
-from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor
+from PySide6.QtGui import QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor, QPalette
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
 
 # Noms des outils (utilisés par la barre d'outils et par le canvas)
@@ -63,12 +63,29 @@ class ImageCanvas(QGraphicsView):
         self._selection_item.hide()
         self._scene.addItem(self._selection_item)
 
+        # Yellow frame used to show a face from the results panel
+        # (separate from the selection rectangle, which belongs to the Select tool)
+        self._highlight_item = QGraphicsRectItem()
+        highlight_pen = QPen(QColor(255, 200, 0), 3)
+        highlight_pen.setCosmetic(True)       # same thickness whatever the zoom
+        self._highlight_item.setPen(highlight_pen)
+        self._highlight_item.setZValue(2)
+        self._highlight_item.hide()
+        self._scene.addItem(self._highlight_item)
+
         self._brush_size = 5
         self._grabbing = False
         self.grab_check = None
         self._hover_grab = False
         self.viewport().setMouseTracking(True)
         self.zoom_changed.connect(lambda _: self._update_cursor())
+
+        # Grey area around the image, so a white image stays visible in light mode (like Paint)
+        window = self.palette().color(QPalette.ColorRole.Window)
+        if window.lightness() > 128:      # light theme
+            self.setBackgroundBrush(QColor(204, 204, 204))
+        else:                             # dark theme
+            self.setBackgroundBrush(QColor(32, 32, 32))
 
         self._tool = TOOL_HAND
         self.set_tool(TOOL_HAND)
@@ -190,6 +207,13 @@ class ImageCanvas(QGraphicsView):
     def show_preview(self, pixmap: QPixmap) -> None:
         self._pixmap_item.setPixmap(pixmap)
 
+    def show_highlight(self, start: QPointF, end: QPointF) -> None:
+        self._highlight_item.setRect(QRectF(start, end).normalized())
+        self._highlight_item.show()
+
+    def clear_highlight(self) -> None:
+        self._highlight_item.hide()
+
     def clear_selection(self) -> None:
         self._selection_item.hide()
 
@@ -203,7 +227,22 @@ class ImageCanvas(QGraphicsView):
         self.fit_to_window()
 
     def wheelEvent(self, event: QWheelEvent):
-        """Désactive le zoom par molette et laisse le défilement standard."""
+        """Ctrl + molette : zoom centré sur la souris. Sans Ctrl : défilement normal."""
+        if (event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and not self._pixmap_item.pixmap().isNull()):
+            steps = event.angleDelta().y() / 120   # one notch of the wheel = 120
+            if steps:
+                cursor = event.position().toPoint()
+                before = self.mapToScene(cursor)               # image point under the mouse
+                self.apply_zoom(self._current_zoom * (1.25 ** steps))
+                after = self.mapToScene(cursor)
+                # Scroll so that the same image point stays under the mouse
+                shift = (before - after) * self._current_zoom
+                h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+                h.setValue(h.value() + round(shift.x()))
+                v.setValue(v.value() + round(shift.y()))
+            event.accept()
+            return
         super().wheelEvent(event)
 
     def apply_zoom(self, zoom_value: float):
