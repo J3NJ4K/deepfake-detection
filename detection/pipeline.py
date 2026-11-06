@@ -3,20 +3,20 @@ from detection.face_detector import detect_faces
 from detection.preprocess import crop_box, crop_face, to_tensor
 from detection.classifier import load_model, predict
 from detection.gradcam import grad_cam
-from detection.univfd import load_univfd, predict_generated, to_clip_tensor
+from detection.commfor import load_commfor, predict_commfor, to_commfor_tensor
 
 GENERATED_THRESHOLD = 0.5
 
 _xception = None
-_univfd = None
+_commfor = None
 
 def analyze_deepfake(image: np.ndarray) -> dict:
     # loads the models the first time they're needed, so the app starts fast
-    global _xception, _univfd
+    global _xception, _commfor
     if _xception is None:
         _xception = load_model()
-    if _univfd is None:
-        _univfd = load_univfd()
+    if _commfor is None:
+        _commfor = load_commfor()
 
     # for each detected face: crops it, converts to a tensor and gets the manipulation probability
     faces = []
@@ -32,6 +32,6 @@ def analyze_deepfake(image: np.ndarray) -> dict:
 
     # UnivFD only on the whole image, it is trained on whole images and gave false positives on face crops
     return {
-        "generated_probability": predict_generated(_univfd, to_clip_tensor(image)),
+        "generated_probability": predict_commfor(_commfor, to_commfor_tensor(image)),
         "faces": faces,
     }
