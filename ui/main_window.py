@@ -4,9 +4,10 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout
+    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar
 )
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette
+from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
+                           QGuiApplication)
 from PySide6.QtCore import Qt, QSize, QPointF
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
@@ -19,6 +20,10 @@ from ui.layers import LayerStack, overlay_from_drawing
 from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
+from ui.new_image_dialog import NewImageDialog
+from ui.background_task import BackgroundTask
+from ui.filter_dialog import FilterDialog
+from ui.results_panel import ResultsPanel
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
@@ -72,6 +77,22 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready - Open an image to start (Ctrl+O)")
 
+        # Moving bar shown in the status bar while an analysis runs in the background
+        self.busy_bar = QProgressBar()
+        self.busy_bar.setRange(0, 0)          # no percentage: just "working..."
+        self.busy_bar.setMaximumWidth(140)
+        self.busy_bar.setTextVisible(False)
+        self.busy_bar.hide()
+        self.status_bar.addPermanentWidget(self.busy_bar)
+
+        # Face detection and deepfake analysis run in a separate thread (window stays usable)
+        self.analysis_task = BackgroundTask(self)
+        self._analysis_size = None   # image size when the analysis started
+
+        # Last values chosen in the filter windows (re-used next time)
+        self.blur_radius = 2         # kernel size = 2 * radius + 1
+        self.threshold_value = 128
+
         # Initialisation UI
         self._create_actions()
         self._create_menus()
@@ -95,6 +116,10 @@ class MainWindow(QMainWindow):
         self._displayed_size = None
         self.deselect()
         self._refresh_layers_panel()
+        if hasattr(self, "results_panel"):     # results of the previous image are not valid any more
+            self._last_boxes = []
+            self.results_panel.clear()
+            self.canvas.clear_highlight()
 
     def _composite(self) -> np.ndarray | None:
         """The image as the user sees it: all visible layers merged."""
@@ -121,17 +146,17 @@ class MainWindow(QMainWindow):
 
     def _create_actions(self):
         # --- File ---
-        self.new_act = self._make_action("&New...", self.new_image,
-                                         shortcut=QKeySequence.StandardKey.New)
-        self.open_act = self._make_action("&Open...", self.open_image,
-                                          shortcut=QKeySequence.StandardKey.Open)
+        self.new_act = self._make_action("&New...", self.new_image, "new", "New image (Ctrl+N)",
+                                         QKeySequence.StandardKey.New)
+        self.open_act = self._make_action("&Open...", self.open_image, "open", "Open an image (Ctrl+O)",
+                                          QKeySequence.StandardKey.Open)
         self.save_act = self._make_action("&Save", self.save_image, "disk", "Save (Ctrl+S)",
                                           QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
                                              "Save As (Ctrl+Shift+S)", QKeySequence.StandardKey.SaveAs)
         self.properties_act = self._make_action("&Properties...", self.show_properties)
-        self.quit_act = self._make_action("&Quit", self.close,
-                                          shortcut=QKeySequence.StandardKey.Quit)
+        self.quit_act = self._make_action("&Quit", self.close, "quit", "Quit",
+                                          QKeySequence.StandardKey.Quit)
 
         # --- History (Undo / Redo) ---
         self.undo_act = self._make_action("&Undo", self.undo, "undo", "Undo (Ctrl+Z)",
@@ -237,11 +262,11 @@ class MainWindow(QMainWindow):
         self.resize_act = self._make_action("&Resize...", self.resize_image, "resize", "Resize the image")
 
         # --- Filters ---
-        self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur")
+        self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur (choose the strength)")
         self.sobel_act = self._make_action("Sobel", self.apply_sobel_filter, "sobel",
                                            "Sobel Filter (Edge Detection)")
         self.threshold_act = self._make_action("Threshold", self.apply_binary_threshold, "threshold",
-                                               "Binary Threshold (128)")
+                                               "Binary Threshold (choose the threshold)")
         self.otsu_act = self._make_action("Otsu", self.apply_histogram_threshold, "otsu",
                                           "Automatic Threshold (Otsu)")
 
@@ -303,155 +328,215 @@ class MainWindow(QMainWindow):
         menubar.addAction(self.undo_act)
         menubar.addAction(self.redo_act)
 
+    # ------------------------------------------------------------------
+    # Filters
+    # ------------------------------------------------------------------
+    def _ask_filter_value(self, make_image, title, label, minimum, maximum, value,
+                          suffix="", hint=""):
+        """
+        Open a FilterDialog with a live preview of make_image(value) on the active layer.
+        Returns the chosen value, or None if the user cancelled.
+        """
+        def show_preview(v):
+            try:
+                rgb = make_image(v)
+            except ValueError as error:
+                self.status_bar.showMessage(str(error), 3000)
+                return
+            self._show_image(self.layers.composite((rgb, self.layers.active_layer.alpha)))
+
+        dialog = FilterDialog(self, title, label, minimum, maximum, value, suffix, hint)
+        dialog.preview_requested.connect(show_preview)
+        dialog.preview_cleared.connect(self._update_display)
+        accepted = dialog.exec() == FilterDialog.DialogCode.Accepted
+        self._update_display()   # remove the preview (the real result is applied just after)
+        return dialog.value() if accepted else None
+
     def apply_gaussian_blur(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
+        def blurred(radius):
+            return gaussian_blur(self.current_image, kernel_size=2 * radius + 1)
+
+        radius = self._ask_filter_value(blurred, "Gaussian Blur", "Radius:", 1, 30,
+                                        self.blur_radius, " px",
+                                        "Bigger radius = stronger blur.")
+        if radius is None:
+            return
+        self.blur_radius = radius
         try:
-            self._set_image(gaussian_blur(self.current_image, kernel_size=5))
-            self.statusBar().showMessage("Gaussian Blur appliqué", 3000)
+            self._set_image(blurred(radius))
+            self.status_bar.showMessage(f"Gaussian Blur applied (radius {radius} px)", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur flou: {e}", 3000)
+            self.status_bar.showMessage(f"Error with Gaussian Blur: {e}", 3000)
 
     def apply_sobel_filter(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
         try:
             self._set_image(sobel_filter(self.current_image))
-            self.statusBar().showMessage("Filtre Sobel appliqué", 3000)
+            self.status_bar.showMessage("Sobel Filter applied", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur Sobel: {e}", 3000)
+            self.status_bar.showMessage(f"Error with Sobel filter: {e}", 3000)
 
     def apply_binary_threshold(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
+        def thresholded(value):
+            return binary_threshold(self.current_image, threshold=value)
+
+        value = self._ask_filter_value(thresholded, "Binary Threshold", "Threshold:", 0, 255,
+                                       self.threshold_value, "",
+                                       "Pixels brighter than the threshold become white, "
+                                       "the others black.")
+        if value is None:
+            return
+        self.threshold_value = value
         try:
-            self._set_image(binary_threshold(self.current_image, threshold=128))
-            self.statusBar().showMessage("Seuillage binaire appliqué", 3000)
+            self._set_image(thresholded(value))
+            self.status_bar.showMessage(f"Binary Threshold applied ({value})", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur seuillage: {e}", 3000)
+            self.status_bar.showMessage(f"Error with binary threshold: {e}", 3000)
 
     def apply_histogram_threshold(self):
         if self.current_image is None:
-            self.statusBar().showMessage("Aucune image chargée", 3000)
+            self.status_bar.showMessage("No image loaded", 3000)
             return
 
         try:
             self._set_image(histogram_threshold(self.current_image))
-            self.statusBar().showMessage("Seuillage Otsu appliqué", 3000)
+            self.status_bar.showMessage("Otsu Threshold applied (threshold chosen automatically)", 3000)
         except Exception as e:
-            self.statusBar().showMessage(f"Erreur Otsu: {e}", 3000)
+            self.status_bar.showMessage(f"Error with Otsu threshold: {e}", 3000)
+
+    # ------------------------------------------------------------------
+    # Detection (runs in the background)
+    # ------------------------------------------------------------------
+    def _start_analysis(self, func, on_done, message) -> bool:
+        """Start func(merged image) in the background. Returns False if it could not start."""
+        if self.current_image is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return False
+        if self.analysis_task.is_running():
+            self.status_bar.showMessage("An analysis is already running, please wait...", 3000)
+            return False
+        image = self._composite().copy()       # what the user sees (all visible layers merged)
+        self._analysis_size = self.layers.size
+        self._set_analysis_running(True, message)
+        self.analysis_task.start(func, (image,), on_done, self._on_analysis_failed)
+        return True
+
+    def _set_analysis_running(self, running: bool, message: str = "") -> None:
+        self.face_detect_act.setEnabled(not running)
+        self.deepfake_act.setEnabled(not running)
+        self.busy_bar.setVisible(running)
+        if running:
+            self.status_bar.showMessage(message)
+
+    def _analysis_still_valid(self) -> bool:
+        """The boxes only make sense if the image was not resized / rotated / closed meanwhile."""
+        if self.layers is None or self.layers.size != self._analysis_size:
+            QMessageBox.warning(self, "Analysis", "The image changed size during the analysis, "
+                                                  "the result was not added. Please run it again.")
+            return False
+        return True
+
+    def _on_analysis_failed(self, error: str) -> None:
+        self._set_analysis_running(False)
+        self.status_bar.showMessage("Analysis failed.", 5000)
+        QMessageBox.critical(self, "Error", f"The analysis failed: {error}")
 
     def run_face_detection(self):
-        if self.current_image is None:
-            QMessageBox.warning(self, "Warning", "Please open an image first.")
+        self._start_analysis(detect_faces, self._on_faces_detected, "Detecting faces...")
+
+    def _on_faces_detected(self, boxes):
+        self._set_analysis_running(False)
+        if not self._analysis_still_valid():
+            return
+        self._last_boxes = list(boxes)
+        self.canvas.clear_highlight()
+        self.results_panel.show_faces(boxes)
+        self._open_results()
+        if not boxes:
+            self.status_bar.showMessage("No faces detected.", 5000)
             return
 
-        try:
-            # Detect on what the user sees (all visible layers merged)
-            boxes = detect_faces(self._composite())
-            if not boxes:
-                QMessageBox.information(self, "Face Detection", "No faces detected in the image.")
-                return
+        def draw_boxes(image):
+            image = image.copy()
+            for (x1, y1, x2, y2) in boxes:
+                # Rectangle bleu (RGB: 0, 150, 255)
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 150, 255), 2)
+            return image
 
-            def draw_boxes(image):
-                image = image.copy()
-                for (x1, y1, x2, y2) in boxes:
-                    # Rectangle bleu (RGB: 0, 150, 255)
-                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 150, 255), 2)
-                return image
-
-            # The boxes go on their own layer: hide or delete it to get the clean photo back
-            self._add_overlay_layer("Faces", draw_boxes)
-            self.status_bar.showMessage(f"Detected {len(boxes)} face(s).")
-            QMessageBox.information(self, "Face Detection", f"Successfully detected {len(boxes)} face(s).")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to run face detection: {e}")
+        # The boxes go on their own layer: hide or delete it to get the clean photo back
+        self._add_overlay_layer("Faces", draw_boxes)
+        self.status_bar.showMessage(f"Detected {len(boxes)} face(s).", 5000)
 
     def run_deepfake_analysis(self):
-        if self.current_image is None:
-            QMessageBox.warning(self, "Warning", "Please open an image first.")
+        self._start_analysis(analyze_deepfake, self._on_deepfake_done,
+                             "Running deepfake analysis... (the first time, the model is loaded too)")
+
+    def _on_deepfake_done(self, results):
+        self._set_analysis_running(False)
+        if not self._analysis_still_valid():
+            return
+        self._last_boxes = [res["bbox"] for res in results]
+        self.canvas.clear_highlight()
+        self.results_panel.show_deepfake(results)
+        self._open_results()
+        if not results:
+            self.status_bar.showMessage("Analysis complete: No faces detected.", 5000)
             return
 
-        self.status_bar.showMessage("Running deepfake analysis...")
-        try:
-            # Analyse what the user sees (all visible layers merged)
-            results = analyze_deepfake(self._composite())
-            if not results:
-                QMessageBox.information(
-                    self, "Deepfake Detection", "No faces detected to analyze."
-                )
-                self.status_bar.showMessage("Analysis complete: No faces detected.")
-                return
-
-            summary_messages = []
-            for i, res in enumerate(results, start=1):
+        def draw_results(image):
+            image = image.copy()
+            for res in results:
+                x1, y1, x2, y2 = res["bbox"]
                 prob = res["manipulation_probability"]
-                verdict = "Manipulated (Fake)" if prob >= 0.5 else "Authentic (Real)"
-                summary_messages.append(f"Face #{i}: {verdict} — {prob * 100:.1f}% manipulation probability")
+                is_fake = prob >= 0.5
 
-            def draw_results(image):
-                image = image.copy()
-                for res in results:
-                    x1, y1, x2, y2 = res["bbox"]
-                    prob = res["manipulation_probability"]
-                    is_fake = prob >= 0.5
+                # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
+                color = (255, 50, 50) if is_fake else (50, 205, 50)
+                label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
 
-                    # Vert (réel) si < 50%, Rouge (deepfake) si >= 50%
-                    color = (255, 50, 50) if is_fake else (50, 205, 50)
-                    label = f"Fake: {prob * 100:.1f}%" if is_fake else f"Real: {(1 - prob) * 100:.1f}%"
+                # Dessiner le cadre
+                cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
 
-                    # Dessiner le cadre
-                    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+                # Dessiner une étiquette texte au-dessus de la boîte
+                font_scale = 0.6
+                thickness = 2
+                (text_w, text_h), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+                )
+                # Fond plein sous le texte pour la lisibilité
+                cv2.rectangle(image, (x1, max(0, y1 - text_h - 10)), (x1 + text_w, y1), color, -1)
+                cv2.putText(image, label, (x1, max(text_h, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
+                            font_scale, (255, 255, 255), thickness, lineType=cv2.LINE_AA)
+            return image
 
-                    # Dessiner une étiquette texte au-dessus de la boîte
-                    font_scale = 0.6
-                    thickness = 2
-                    (text_w, text_h), baseline = cv2.getTextSize(
-                        label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-                    )
-                    # Fond plein sous le texte pour la lisibilité
-                    cv2.rectangle(
-                        image,
-                        (x1, max(0, y1 - text_h - 10)),
-                        (x1 + text_w, y1),
-                        color,
-                        -1,
-                    )
-                    cv2.putText(
-                        image,
-                        label,
-                        (x1, max(text_h, y1 - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        font_scale,
-                        (255, 255, 255),
-                        thickness,
-                        lineType=cv2.LINE_AA,
-                    )
-                return image
+        # Grad-CAM on its own layer below the boxes, stronger for more suspicious faces
+        height, width = self.layers.size
+        self._push_history()
+        self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(results, height, width))
+        self._after_edit()
 
-            # Grad-CAM on its own layer below the boxes, stronger for more suspicious faces
-            height, width = self.layers.size
-            self._push_history()
-            self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(results, height, width))
-            self._after_edit()
+        # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
+        self._add_overlay_layer("Deepfake analysis", draw_results)
 
-            # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
-            self._add_overlay_layer("Deepfake analysis", draw_results)
+        fakes = sum(res["manipulation_probability"] >= 0.5 for res in results)
+        self.status_bar.showMessage(f"Deepfake analysis complete: {len(results)} face(s), "
+                                    f"{fakes} likely fake.", 5000)
 
-            report = "\n".join(summary_messages)
-            self.status_bar.showMessage("Deepfake analysis complete.")
-            QMessageBox.information(self, "Deepfake Analysis Results", report)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to run deepfake analysis: {e}")
-            self.status_bar.showMessage("Analysis failed.")
+    def closeEvent(self, event):
+        # Let a running analysis finish before the window (and its thread) is destroyed
+        self.analysis_task.wait()
+        super().closeEvent(event)
 
     def _add_overlay_layer(self, name, draw):
         """Put what draw(image) draws on a new transparent layer at the top."""
@@ -504,6 +589,7 @@ class MainWindow(QMainWindow):
         detection = self.ribbon.add_group("Detection")
         detection.add_large_button(self.face_detect_act)
         detection.add_large_button(self.deepfake_act)
+        detection.add_large_button(self.results_act)
 
     def _on_palette_color(self, slot, rgb):
         """A colour was picked in the Colors block (palette or colour wheel)."""
@@ -576,7 +662,6 @@ class MainWindow(QMainWindow):
         shown / hidden with the "Layers" button of the ribbon (or F7).
         """
         self.layers_panel = LayersPanel(self)
-        self.layers_panel.setFixedWidth(220)
         self.layers_panel.hide()
 
         # Size / opacity bar on the left, shown when a drawing tool is selected
@@ -586,21 +671,43 @@ class MainWindow(QMainWindow):
         self.tool_options.size_changed.connect(self.set_brush_size)
         self.tool_options.opacity_changed.connect(self.set_brush_opacity)
 
-        # Central area = [ tool options | canvas | layers panel ]
+        # Detection results panel (under the layers panel), opens after an analysis
+        self.results_panel = ResultsPanel(self)
+        self.results_panel.hide()
+        self.results_panel.face_selected.connect(self._show_face)
+        self._last_boxes = []      # boxes of the faces listed in the results panel
+
+        # Right column = layers panel on top, results panel under it
+        self.side_column = QWidget(self)
+        self.side_column.setFixedWidth(220)
+        side = QVBoxLayout(self.side_column)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(0)
+        side.addWidget(self.layers_panel, 1)
+        side.addWidget(self.results_panel, 1)
+        self.side_column.hide()
+
+        # Central area = [ tool options | canvas | right column ]
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.tool_options)
         layout.addWidget(self.canvas, 1)       # the canvas takes all the remaining space
-        layout.addWidget(self.layers_panel)
+        layout.addWidget(self.side_column)
         self.setCentralWidget(central)
 
-        # Checkable button that shows / hides the panel
+        # Checkable buttons that show / hide the panels
         self.layers_act = self._make_action("Layers", None, "layers",
                                             "Show / hide the layers panel (F7)", "F7")
         self.layers_act.setCheckable(True)
-        self.layers_act.toggled.connect(self.layers_panel.setVisible)
+        self.layers_act.toggled.connect(lambda on: self._show_side_panel(self.layers_panel, on))
+
+        self.results_act = self._make_action("Results", None, "results",
+                                             "Show / hide the detection results")
+        self.results_act.setCheckable(True)
+        self.results_act.toggled.connect(lambda on: self._show_side_panel(self.results_panel, on))
+        self.results_panel.closed.connect(lambda: self.results_act.setChecked(False))
 
         self.layers_panel.add_requested.connect(self.add_layer)
         self.layers_panel.delete_requested.connect(self.delete_layer)
@@ -608,6 +715,26 @@ class MainWindow(QMainWindow):
         self.layers_panel.visibility_changed.connect(self._on_layer_visibility_changed)
         self.layers_panel.opacity_changed.connect(self._on_layer_opacity_changed)
         self.layers_panel.renamed.connect(self._on_layer_renamed)
+
+    def _show_side_panel(self, panel, visible: bool) -> None:
+        """Show / hide one panel of the right column; hide the column when both are hidden."""
+        panel.setVisible(visible)
+        if panel is self.results_panel and not visible:
+            self.canvas.clear_highlight()       # remove the face highlight with the results
+        self.side_column.setVisible(not self.layers_panel.isHidden()
+                                    or not self.results_panel.isHidden())
+
+    def _open_results(self) -> None:
+        if not self.results_act.isChecked():
+            self.results_act.setChecked(True)   # also shows the panel (toggled signal)
+
+    def _show_face(self, index: int) -> None:
+        """Frame the clicked face on the image and centre the view on it."""
+        if not (0 <= index < len(self._last_boxes)) or self.layers is None:
+            return
+        x1, y1, x2, y2 = self._last_boxes[index]
+        self.canvas.show_highlight(QPointF(x1, y1), QPointF(x2, y2))
+        self.canvas.centerOn((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _refresh_layers_panel(self) -> None:
         if hasattr(self, "layers_panel"):
@@ -693,14 +820,13 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Image: {w}x{h} px | Layers: {len(self.layers)}")
 
     def new_image(self) -> None:
-        width, ok = QInputDialog.getInt(self, "New image", "Width (px):", 800, 1, 10000)
-        if not ok:
+        # Window with the size (custom or preset formats) and the background colour
+        dialog = NewImageDialog(self)
+        if dialog.exec() != NewImageDialog.DialogCode.Accepted:
             return
-        height, ok = QInputDialog.getInt(self, "New image", "Height (px):", 600, 1, 10000)
-        if not ok:
-            return
+        width, height, color = dialog.values()
 
-        self.current_image = new_img(width, height)
+        self.current_image = new_img(width, height, color)
         self.current_file_path = None  # not saved yet -> Save will ask for a file name
         self.history.clear()
         self._update_undo_redo_state()
@@ -892,8 +1018,34 @@ class MainWindow(QMainWindow):
 
     def _draw_current_shape(self, image, tool, end):
         start = (self._shape_start.x(), self._shape_start.y())
-        return draw_shape(image, tool, start, (end.x(), end.y()),
-                          self.brush_color, self.brush_size)
+        end = self._shape_end(tool, start, (end.x(), end.y()))
+        return draw_shape(image, tool, start, end, self.brush_color, self.brush_size)
+
+    def _shape_end(self, tool, start, end):
+        """
+        End point of a shape. While Shift is held, the shape is kept "perfect":
+        square / circle / regular star..., equilateral triangle, and lines snapped
+        to horizontal, vertical or 45°.
+        """
+        if not QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            return end
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        sign_x = 1 if dx >= 0 else -1
+        sign_y = 1 if dy >= 0 else -1
+
+        if tool == TOOL_LINE:
+            if abs(dy) < 0.414 * abs(dx):        # less than 22.5°: horizontal
+                return (end[0], start[1])
+            if abs(dx) < 0.414 * abs(dy):        # more than 67.5°: vertical
+                return (start[0], end[1])
+            d = max(abs(dx), abs(dy))            # otherwise: 45° diagonal
+            return (start[0] + sign_x * d, start[1] + sign_y * d)
+
+        d = max(abs(dx), abs(dy))
+        if tool == TOOL_TRIANGLE:
+            # Equilateral triangle: height = width * sqrt(3) / 2
+            return (start[0] + sign_x * d, start[1] + sign_y * d * 0.866)
+        return (start[0] + sign_x * d, start[1] + sign_y * d)
 
     def _show_image(self, image):
         self.canvas.show_preview(QPixmap.fromImage(numpy_to_qimage(image)))
@@ -1078,7 +1230,7 @@ class MainWindow(QMainWindow):
             self._shape_view = self._composite()
         height, width = self.layers.size
         sx, sy = self._shape_start.x(), self._shape_start.y()
-        ex, ey = pos.x(), pos.y()
+        ex, ey = self._shape_end(tool, (sx, sy), (pos.x(), pos.y()))
         margin = self.brush_size + 3
         x0 = max(0, int(min(sx, ex)) - margin)
         x1 = min(width, int(max(sx, ex)) + margin + 1)
