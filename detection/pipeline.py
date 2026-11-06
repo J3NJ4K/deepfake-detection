@@ -3,23 +3,35 @@ from detection.face_detector import detect_faces
 from detection.preprocess import crop_box, crop_face, to_tensor
 from detection.classifier import load_model, predict
 from detection.gradcam import grad_cam
+from detection.univfd import load_univfd, predict_generated, to_clip_tensor
 
-_model = None
+GENERATED_THRESHOLD = 0.5
 
-def analyze_deepfake(image: np.ndarray) -> list[dict]:
-    # loads the model the first time it's needed, so the app starts fast
-    global _model
-    if _model is None:
-        _model = load_model()
+_xception = None
+_univfd = None
 
-    # for each detected face: crops it, converts to a tensor and gets the probability
-    results = []
+def analyze_deepfake(image: np.ndarray) -> dict:
+    # loads the models the first time they're needed, so the app starts fast
+    global _xception, _univfd
+    if _xception is None:
+        _xception = load_model()
+    if _univfd is None:
+        _univfd = load_univfd()
+
+    # for each detected face: crops it, converts to a tensor and gets the manipulation probability
+    faces = []
     for bbox in detect_faces(image):
-        tensor = to_tensor(crop_face(image, bbox))
-        results.append({
+        face = crop_face(image, bbox)
+        tensor = to_tensor(face)
+        faces.append({
             "bbox": bbox,
-            "manipulation_probability": predict(_model, tensor),
-            "heatmap": grad_cam(_model, tensor),
+            "manipulation_probability": predict(_xception, tensor),
+            "heatmap": grad_cam(_xception, tensor),
             "crop_box": crop_box(image, bbox),
         })
-    return results
+
+    # UnivFD only on the whole image, it is trained on whole images and gave false positives on face crops
+    return {
+        "generated_probability": predict_generated(_univfd, to_clip_tensor(image)),
+        "faces": faces,
+    }

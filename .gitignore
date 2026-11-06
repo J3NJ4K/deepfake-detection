@@ -238,6 +238,9 @@ faces_out.jpg
 test_gradcam.py
 obama.jpg
 obama2.jpg
+test_univfd.py
+ai_pics/
+progan_test/
 
 # Models (DeepfakeBench / Xception)
 models/xception_best.pth
