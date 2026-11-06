@@ -12,7 +12,8 @@ from PySide6.QtCore import Qt, QSize, QPointF
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
                        TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
-                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW, TOOL_LASSO)
+                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW, TOOL_LASSO,
+                       TOOL_TEXT)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
@@ -20,6 +21,7 @@ from ui.layers import LayerStack, overlay_from_drawing
 from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
+from ui.text_tool import TextDialog, render_text_layer
 from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
 from ui.filter_dialog import FilterDialog
@@ -195,6 +197,8 @@ class MainWindow(QMainWindow):
         self.arrow_tool_act = self._add_tool("Arrow", TOOL_ARROW, "arrow", "Arrow: drag to draw")
         self.fill_tool_act = self._add_tool("Fill", TOOL_FILL, "bucket",
                                             "Fill: click inside a shape to fill it with the fill color")
+        self.text_tool_act = self._add_tool("Text", TOOL_TEXT, "text",
+                                            "Text: click where you want to add text, then start typing")
 
         self.hand_tool_act.setChecked(True)
 
@@ -565,7 +569,7 @@ class MainWindow(QMainWindow):
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
                                  self.lasso_tool_act, self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act, self.picker_tool_act,
-                                 self.fill_tool_act])
+                                 self.fill_tool_act, self.text_tool_act])
 
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
@@ -1000,6 +1004,9 @@ class MainWindow(QMainWindow):
         if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
             self._end_stroke()
             return
+        if tool == TOOL_TEXT:
+            self._add_text(pos)
+            return
         if tool == TOOL_SELECT:
             self._end_select(pos)
             return
@@ -1022,11 +1029,6 @@ class MainWindow(QMainWindow):
         return draw_shape(image, tool, start, end, self.brush_color, self.brush_size)
 
     def _shape_end(self, tool, start, end):
-        """
-        End point of a shape. While Shift is held, the shape is kept "perfect":
-        square / circle / regular star..., equilateral triangle, and lines snapped
-        to horizontal, vertical or 45°.
-        """
         if not QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             return end
         dx, dy = end[0] - start[0], end[1] - start[1]
@@ -1062,6 +1064,29 @@ class MainWindow(QMainWindow):
         if color.isValid():
             self.fill_color = (color.red(), color.green(), color.blue())
             self._update_fill_icon()
+
+    def _add_text(self, pos):
+        if self.layers is None:
+            return
+        dialog = TextDialog(self)
+        if dialog.exec() != TextDialog.DialogCode.Accepted:
+            return
+        text, size, bold = dialog.values()
+        if not text.strip():
+            return
+        height, width = self.layers.size
+        rgb, alpha = render_text_layer(text, pos.x(), pos.y(), size, self.brush_color,
+                                       width, height, bold)
+        if not alpha.any():
+            self.status_bar.showMessage("The text doesn't fit inside the image.", 3000)
+            return
+        self._push_history()
+        self.layers.add_layer_on_top(f"Text: {text[:20]}", rgb, alpha)
+        self._after_edit()
+        # Switch to the Hand so the text can be dragged right away
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+        self.status_bar.showMessage("Text added! Drag it with the hand tool.", 4000)
 
     def _fill_at(self, pos):
             x, y = int(pos.x()), int(pos.y())
@@ -1296,6 +1321,11 @@ class MainWindow(QMainWindow):
         if self.layers.active != 0:
                 self.layers.active = 0
                 self._refresh_layers_panel()
+
+    @staticmethod
+    def _touches(layer, x, y, radius=6) -> bool:
+        near = layer.alpha[max(0, y - radius):y + radius + 1, max(0, x - radius):x + radius + 1]
+        return bool(near.any())
 
     def _piece_at(self, pos) -> bool:
         if self.layers is None:

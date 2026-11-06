@@ -20,6 +20,7 @@ TOOL_DIAMOND = "diamond"
 TOOL_STAR = "star"
 TOOL_ARROW = "arrow"
 TOOL_LASSO = "lasso"
+TOOL_TEXT = "text"
 
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
