@@ -62,10 +62,11 @@ New-Item -ItemType Directory -Force models
 mkdir -p models
 ```
 
-The following two files must be placed inside 'models/':
+The following three files must be placed inside 'models/':
 
 - 'face_detection_yunet_20203mar.ohnx'
 - 'xception_best.pth'
+- 'univfd_fc.pth'
 
 #### YuNet face detector
 
@@ -90,6 +91,21 @@ placed into `models/`.
 
 ```text
 models/xception_best.pth
+```
+
+#### UnivFD AI-generated image detector
+
+Only the small linear layer is downloaded here. The CLIP ViT-L/14 backbone (~1.7 GB) is downloaded automatically from Hugging Face the first time an image is analyzed.
+
+On Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -Uri "https://github.com/Yuheng-Li/UniversalFakeDetect/raw/main/pretrained_weights/fc_weights.pth" -OutFile "models/univfd_fc.pth"
+```
+
+On MacOS / Linux:
+```bash
+curl -L -o models/univfd_fc.pth https://github.com/Yuheng-Li/UniversalFakeDetect/raw/main/pretrained_weights/fc_weights.pth
 ```
 
 ## Running the Application
