@@ -4,11 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-<<<<<<< HEAD
-    QColorDialog, QHBoxLayout, QApplication
-=======
     QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication
->>>>>>> origin/dev
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
                            QGuiApplication)
