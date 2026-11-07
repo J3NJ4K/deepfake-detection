@@ -21,6 +21,8 @@ from ui.layers import LayerStack, overlay_from_drawing
 from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
+from ui.adjust_dialog import AdjustDialog
+from core.adjust import brightness_contrast
 from ui.text_tool import TextDialog, render_text_layer
 from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
@@ -263,6 +265,8 @@ class MainWindow(QMainWindow):
         self.flip_d_act = self._make_action("Transpose", lambda: self._apply_edit(flip_diagonal),
                                             "reflect-diagonal", "Flip Diagonal (swap rows and columns)")
         self.resize_act = self._make_action("&Resize...", self.resize_image, "resize", "Resize the image")
+        self.adjust_act = self._make_action("Adjust", self.adjust_brightness_contrast, "adjust",
+                                            "Brightness / Contrast")
 
         # --- Filters ---
         self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur (choose the strength)")
@@ -625,6 +629,7 @@ class MainWindow(QMainWindow):
                                  self.flip_h_act, self.flip_v_act,
                                  self.rot_180_act, self.flip_d_act])
         image.add_large_button(self.resize_act)
+        image.add_large_button(self.adjust_act)
 
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
@@ -1184,6 +1189,27 @@ class MainWindow(QMainWindow):
         self.hand_tool_act.setChecked(True)
         self._on_tool_clicked(self.hand_tool_act)
         self.status_bar.showMessage("Text added! Use the hand tool to move it.", 4000)
+
+    def adjust_brightness_contrast(self):
+        if self.layers is None:
+            QMessageBox.warning(self, "Warning", "Open an image first.")
+            return
+        original = self.current_image
+        alpha = self.layers.active_layer.alpha
+
+        def show_preview(brightness, contrast):
+            adjusted = brightness_contrast(original, brightness, contrast)
+            self._show_image(self.layers.composite((adjusted, alpha)))
+
+        dialog = AdjustDialog(self)
+        dialog.preview_requested.connect(show_preview)
+        accepted = dialog.exec() == AdjustDialog.DialogCode.Accepted
+        self._update_display()  # remove the preview
+        brightness, contrast = dialog.values()
+        if not accepted or (brightness == 0 and contrast == 0):
+            return
+        self._set_image(brightness_contrast(original, brightness, contrast))  # undo with Ctrl+Z
+        self.status_bar.showMessage(f"Brightness {brightness:+d}, contrast {contrast:+d}", 3000)
 
     def _fill_at(self, pos):
             x, y = int(pos.x()), int(pos.y())
