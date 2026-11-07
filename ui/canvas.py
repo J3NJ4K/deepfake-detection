@@ -20,6 +20,7 @@ TOOL_DIAMOND = "diamond"
 TOOL_STAR = "star"
 TOOL_ARROW = "arrow"
 TOOL_LASSO = "lasso"
+TOOL_TEXT = "text"
 
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
@@ -125,6 +126,8 @@ class ImageCanvas(QGraphicsView):
             self.viewport().unsetCursor()
         elif self._tool == TOOL_ERASER:
             self.viewport().setCursor(self._eraser_cursor())
+        elif self._tool == TOOL_TEXT:
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         else:
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
 
