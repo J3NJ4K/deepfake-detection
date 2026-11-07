@@ -20,6 +20,7 @@ TOOL_DIAMOND = "diamond"
 TOOL_STAR = "star"
 TOOL_ARROW = "arrow"
 TOOL_LASSO = "lasso"
+TOOL_ZOOM = "zoom"
 TOOL_TEXT = "text"
 
 class ImageCanvas(QGraphicsView):
@@ -126,10 +127,26 @@ class ImageCanvas(QGraphicsView):
             self.viewport().unsetCursor()
         elif self._tool == TOOL_ERASER:
             self.viewport().setCursor(self._eraser_cursor())
+        elif self._tool == TOOL_ZOOM:
+            self.viewport().setCursor(self._zoom_cursor())
         elif self._tool == TOOL_TEXT:
             self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         else:
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+
+    def _zoom_cursor(self) -> QCursor:
+        pixmap = QPixmap(26, 26)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for color, width in ((QColor(255, 255, 255), 4), (QColor(30, 30, 30), 2)):
+            painter.setPen(QPen(color, width))
+            painter.drawEllipse(2, 2, 15, 15)
+            painter.drawLine(15, 15, 23, 23)
+            painter.drawLine(6, 10, 13, 10)
+            painter.drawLine(10, 6, 10, 13)
+        painter.end()
+        return QCursor(pixmap, 10, 10)
 
     def _eraser_cursor(self) -> QCursor:
         diameter = int(round(self._brush_size * self._current_zoom))
@@ -172,6 +189,16 @@ class ImageCanvas(QGraphicsView):
                 self._update_cursor()
 
     def mousePressEvent(self, event: QMouseEvent):
+        # Zoom tool: left click = zoom in, right click = zoom out
+
+        if self._tool == TOOL_ZOOM and not self._pixmap_item.pixmap().isNull():
+            if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+                spot = self._image_pos(event)
+                factor = 1.25 if event.button() == Qt.MouseButton.LeftButton else 1 / 1.25
+                self.apply_zoom(self._current_zoom * factor)
+                self.centerOn(spot)
+                event.accept()
+                return
         if (event.button() == Qt.MouseButton.LeftButton and self._tool in (TOOL_HAND, TOOL_SELECT, TOOL_LASSO)
                 and self._over_selection(event)):
             self._grabbing = True
