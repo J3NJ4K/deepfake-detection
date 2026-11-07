@@ -126,6 +126,8 @@ class ImageCanvas(QGraphicsView):
             self.viewport().unsetCursor()
         elif self._tool == TOOL_ERASER:
             self.viewport().setCursor(self._eraser_cursor())
+        elif self._tool == TOOL_TEXT:
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         else:
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
 

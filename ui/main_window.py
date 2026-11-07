@@ -103,9 +103,7 @@ class MainWindow(QMainWindow):
         self._create_bottom_toolbar()
         self._update_undo_redo_state()
 
-    # ------------------------------------------------------------------
     # Current image = active layer
-    # ------------------------------------------------------------------
     @property
     def current_image(self) -> np.ndarray | None:
         """Pixels of the active layer (what the tools and filters work on)."""
@@ -118,13 +116,12 @@ class MainWindow(QMainWindow):
         self._displayed_size = None
         self.deselect()
         self._refresh_layers_panel()
-        if hasattr(self, "results_panel"):     # results of the previous image are not valid any more
+        if hasattr(self, "results_panel"):
             self._last_boxes = []
             self.results_panel.clear()
             self.canvas.clear_highlight()
 
     def _composite(self) -> np.ndarray | None:
-        """The image as the user sees it: all visible layers merged."""
         return None if self.layers is None else self.layers.composite()
 
     def _make_action(self, text: str, slot, icon_name: str | None = None,
@@ -281,7 +278,6 @@ class MainWindow(QMainWindow):
                                               "Run Deepfake Analysis")
 
     def _on_tool_clicked(self, action):
-        """Switch to the clicked tool, or back to the Hand if the active tool was clicked again."""
         if action.isChecked():
             tool = action.data()
         else:
@@ -290,7 +286,6 @@ class MainWindow(QMainWindow):
         if tool not in (TOOL_SELECT, TOOL_HAND, TOOL_LASSO):
             self.deselect()
         self.canvas.set_tool(tool)
-        # Show the size / opacity bar only for the tools that use them
         self.tool_options.show_for_tool(tool in SIZE_TOOLS, tool in OPACITY_TOOLS)
 
     def _add_tool(self, text: str, tool_name: str, icon_name: str, tooltip: str) -> QAction:
@@ -1065,40 +1060,73 @@ class MainWindow(QMainWindow):
             self.fill_color = (color.red(), color.green(), color.blue())
             self._update_fill_icon()
 
+# Text tool
+
     def _add_text(self, pos):
         if self.layers is None:
             return
+        height, width = self.layers.size
+        photo = self._composite()
         dialog = TextDialog(self)
-        if dialog.exec() != TextDialog.DialogCode.Accepted:
+
+        def preview():
+            text, size, style = dialog.current()
+            if text.strip():
+                rgb, alpha = render_text_layer(text, pos.x(), pos.y(), size, self.brush_color,
+                                               width, height, **style)
+                if alpha.any():
+                    a = alpha[:, :, None].astype(np.float32) / 255.0
+                    self._show_image((photo * (1 - a) + rgb * a).astype(np.uint8))
+                    left, top, right, bottom = mask_box(alpha)
+                    self.canvas.show_selection(QPointF(left - 4, top - 4), QPointF(right + 4, bottom + 4))
+                    return
+            self._show_image(photo)
+            self.canvas.show_selection(QPointF(pos.x() - 2, pos.y()), QPointF(pos.x() + 2, pos.y() + size))
+
+        dialog.changed.connect(preview)
+        preview()
+
+        spot = self.canvas.viewport().mapToGlobal(self.canvas.mapFromScene(pos))
+        dialog.adjustSize()
+        screen = self.screen().availableGeometry()
+        x = min(max(screen.left(), spot.x()), screen.right() - dialog.width())
+        y = spot.y() + int(dialog.current()[1] * self.canvas.transform().m11()) + 30
+        if y + dialog.height() > screen.bottom():
+            y = max(screen.top(), spot.y() - dialog.height() - 30)
+        dialog.move(x, y)
+
+        accepted = dialog.exec() == TextDialog.DialogCode.Accepted
+        self.canvas.clear_selection()
+        self._update_display()
+        if not accepted:
             return
-        text, size, bold = dialog.values()
+        text, size, style = dialog.values()
         if not text.strip():
             return
-        height, width = self.layers.size
         rgb, alpha = render_text_layer(text, pos.x(), pos.y(), size, self.brush_color,
-                                       width, height, bold)
+                                       width, height, **style)
         if not alpha.any():
-            self.status_bar.showMessage("The text doesn't fit inside the image.", 3000)
+            self.status_bar.showMessage("The text is outside the image", 3000)
             return
         self._push_history()
-        self.layers.add_layer_on_top(f"Text: {text[:20]}", rgb, alpha)
+        self.layers.add_layer_on_top(f"Text: {text.strip().splitlines()[0][:20]}", rgb, alpha)
         self._after_edit()
         # Switch to the Hand so the text can be dragged right away
         self.hand_tool_act.setChecked(True)
         self._on_tool_clicked(self.hand_tool_act)
-        self.status_bar.showMessage("Text added! Drag it with the hand tool.", 4000)
+        self.status_bar.showMessage("Text added! Use the hand tool to move it.", 4000)
 
     def _fill_at(self, pos):
             x, y = int(pos.x()), int(pos.y())
             height, width = self.current_image.shape[:2]
-            if 0 <= x < width and 0 <= y < height:  # ignore clicks outside the image
+            if 0 <= x < width and 0 <= y < height:
                 self._apply_edit(flood_fill, x, y, self.fill_color, 60)
 
     def _pick_color(self, pos):
         try:
-            color = get_pixel_color(self._composite(), pos.x(), pos.y())  # colour as seen on screen
+            color = get_pixel_color(self._composite(), pos.x(), pos.y())
         except ValueError:
-            return  # clicked outside the image: do nothing
+            return
         self.brush_color = color
         self._update_color_icon()
         self.status_bar.showMessage(f"Picked color RGB{color}", 3000)
@@ -1113,7 +1141,7 @@ class MainWindow(QMainWindow):
         swatch = QPixmap(32, 32)
         swatch.fill(QColor(*self.brush_color))
         self.color_act.setIcon(QIcon(swatch))
-        if hasattr(self, "color_palette"):   # keep the Colors block in sync (e.g. after the picker)
+        if hasattr(self, "color_palette"):
             self.color_palette.set_color(SLOT_COLOR, self.brush_color)
 
     def _update_size_icon(self):
@@ -1140,7 +1168,6 @@ class MainWindow(QMainWindow):
             self.set_brush_size(size)
 
     def set_brush_size(self, size: int) -> None:
-        """Single place that changes the size (dialog, slider or typed value)."""
         self.brush_size = size
         self.size_act.setText(f"Size: {size}")
         self._update_size_icon()
@@ -1151,25 +1178,14 @@ class MainWindow(QMainWindow):
         self.brush_opacity = percent / 100
         self.tool_options.set_opacity(percent)
 
-    # ------------------------------------------------------------------
-    # Brush / eraser strokes
-    # ------------------------------------------------------------------
-    # While the mouse moves, only the new piece of the stroke (from the previous mouse
-    # position to the new one) is drawn, and only its small rectangle of the screen is
-    # recomputed. This keeps drawing smooth whatever the image size, the length of the
-    # stroke or the number of layers.
-    #
-    # The stroke is first drawn as a coverage mask (0 = untouched, 255 = fully covered,
-    # with soft anti-aliased edges), then mixed with the active layer using the colour
-    # and the opacity of the brush (or removed from the layer for the eraser).
-
+# Eraser and brush stroke
     def _begin_stroke(self, tool, pos):
         if self.layers is None:
             return
         self._stroke_tool = tool
         self._stroke_mask = np.zeros(self.layers.size, dtype=np.uint8)
-        self._stroke_view = self._composite().copy()   # what the screen shows during the stroke
-        self._stroke_box = None                        # rectangle covered by the stroke so far
+        self._stroke_view = self._composite().copy()
+        self._stroke_box = None
         point = (pos.x(), pos.y())
         self._stroke_points = [point]
         self._add_stroke_segment(point, point)
@@ -1190,7 +1206,6 @@ class MainWindow(QMainWindow):
             new_rgb[region], new_alpha[region] = rgb, alpha
             self._push_history()
             layer.rgb, layer.alpha = new_rgb, new_alpha
-            # The preview shown during the stroke is exactly the final image: reuse it
             self.layers.remember_composite(self._stroke_view)
             self._after_edit()
         self._stroke_mask = None
@@ -1208,7 +1223,6 @@ class MainWindow(QMainWindow):
             return  # completely outside the image
         region = (slice(y0, y1), slice(x0, x1))
 
-        # Draw the new piece on the coverage mask with the project's brush function
         points = [(p0[0] - x0, p0[1] - y0)]
         if p1 != p0:
             points.append((p1[0] - x0, p1[1] - y0))
@@ -1228,7 +1242,6 @@ class MainWindow(QMainWindow):
             self._stroke_box = (min(b[0], y0), max(b[1], y1), min(b[2], x0), max(b[3], x1))
 
     def _stroke_result(self, region):
-        """Active layer inside `region` with the current stroke applied: (rgb, alpha)."""
         layer = self.layers.active_layer
         coverage = self._stroke_mask[region].astype(np.float32)[:, :, None] / 255.0
         alpha = layer.alpha[region].astype(np.float32)[:, :, None] / 255.0
@@ -1238,7 +1251,6 @@ class MainWindow(QMainWindow):
             new_alpha = alpha * (1.0 - coverage)
             return layer.rgb[region], (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8)
 
-        # Brush: paint the colour "over" the layer with the chosen opacity
         paint = coverage * self.brush_opacity
         color = np.array(self.brush_color, dtype=np.float32)
         rgb = layer.rgb[region].astype(np.float32)
@@ -1248,7 +1260,6 @@ class MainWindow(QMainWindow):
                 (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8))
 
     def _preview_shape(self, tool, pos):
-        """Live preview of a shape: only the rectangle around the shape is recomputed."""
         if self.layers is None:
             return
         if self._shape_view is None:
