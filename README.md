@@ -92,6 +92,10 @@ placed into `models/`.
 models/xception_best.pth
 ```
 
+#### Community Forensics AI-generated image detector
+
+No manual download needed. The model (~87 MB) is downloaded automatically from Hugging Face (`OwensLab/commfor-model-384`) the first time an image is analyzed.
+
 ## Running the Application
 
 Make sure the virtual environment is activated and the required model files are inside `models/`.

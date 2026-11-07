@@ -8,9 +8,10 @@ if len(sys.argv) < 2:
 
 image = read_img(sys.argv[1])
 results = analyze_deepfake(image)
+print(f"whole image AI-generated: {results['generated_probability']:.2f}")
 
 out = image.copy()
-for r in results:
+for r in results["faces"]:
     x1, y1, x2, y2 = r["bbox"]
     p = r["manipulation_probability"]
     print(f"{r['bbox']}: {p:.2f}")

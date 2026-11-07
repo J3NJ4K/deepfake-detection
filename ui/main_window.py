@@ -4,7 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar
+    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
                            QGuiApplication)
@@ -29,10 +29,11 @@ from ui.results_panel import ResultsPanel
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
                             flip_diagonal, resize_scale, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
-from core.selection import selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask
+from core.selection import (selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask,
+                            smart_cut_mask)
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
-from detection.pipeline import analyze_deepfake
+from detection.pipeline import analyze_deepfake, GENERATED_THRESHOLD
 from detection.gradcam import heatmap_layer
 from core.filters import (
     binary_threshold,
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
         # Face detection and deepfake analysis run in a separate thread (window stays usable)
         self.analysis_task = BackgroundTask(self)
         self._analysis_size = None   # image size when the analysis started
+        self._deepfake_ran = False   # the first analysis also downloads / loads the models
 
         # Last values chosen in the filter windows (re-used next time)
         self.blur_radius = 2         # kernel size = 2 * radius + 1
@@ -274,6 +276,8 @@ class MainWindow(QMainWindow):
         # --- Detection ---
         self.face_detect_act = self._make_action("Faces", self.run_face_detection, "face",
                                                  "Detect Faces")
+        self.cut_faces_act = self._make_action("Cut faces", self.cut_faces, "smart_cut",
+                                               "Cut out every face as a sticker you can drag")
         self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, "deepfake",
                                               "Run Deepfake Analysis")
 
@@ -449,7 +453,13 @@ class MainWindow(QMainWindow):
     def _on_analysis_failed(self, error: str) -> None:
         self._set_analysis_running(False)
         self.status_bar.showMessage("Analysis failed.", 5000)
-        QMessageBox.critical(self, "Error", f"The analysis failed: {error}")
+        hint = ""
+        if "models" in error or ".pth" in error or ".onnx" in error:
+            hint = "\n\nA model file seems to be missing: see the README (section about the models/ folder)."
+        elif "huggingface" in error.lower() or "connection" in error.lower():
+            hint = ("\n\nThe first analysis downloads the CLIP model (~1.7 GB) from Hugging Face: "
+                    "check your internet connection and try again.")
+        QMessageBox.critical(self, "Error", f"The analysis failed: {error}{hint}")
 
     def run_face_detection(self):
         self._start_analysis(detect_faces, self._on_faces_detected, "Detecting faces...")
@@ -478,24 +488,40 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Detected {len(boxes)} face(s).", 5000)
 
     def run_deepfake_analysis(self):
-        self._start_analysis(analyze_deepfake, self._on_deepfake_done,
-                             "Running deepfake analysis... (the first time, the model is loaded too)")
+        if self._deepfake_ran:
+            message = "Running deepfake analysis..."
+        else:
+            # First time: CLIP (~1.7 GB) is downloaded from the internet, then both models are loaded
+            message = ("Running deepfake analysis... First time: downloading and loading the models "
+                       "(CLIP, about 1.7 GB), this can take several minutes.")
+        self._start_analysis(analyze_deepfake, self._on_deepfake_done, message)
 
     def _on_deepfake_done(self, results):
+        """
+        results = {"generated_probability": float,   # whole image is AI-generated (UnivFD)
+                   "faces": [ {bbox, manipulation_probability, heatmap, crop_box}, ... ]}  # Xception
+        """
+        self._deepfake_ran = True
         self._set_analysis_running(False)
         if not self._analysis_still_valid():
             return
-        self._last_boxes = [res["bbox"] for res in results]
+        generated = results["generated_probability"]
+        faces = results["faces"]
+        self._last_boxes = [face["bbox"] for face in faces]
         self.canvas.clear_highlight()
-        self.results_panel.show_deepfake(results)
+        self.results_panel.show_deepfake(faces, generated, GENERATED_THRESHOLD)
         self._open_results()
-        if not results:
-            self.status_bar.showMessage("Analysis complete: No faces detected.", 5000)
+
+        image_verdict = "likely AI-generated" if generated >= GENERATED_THRESHOLD else "likely not AI-generated"
+        if not faces:
+            # No face: the whole-image score is still shown, but there is nothing to draw
+            self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
+                                        f"no faces found.", 8000)
             return
 
         def draw_results(image):
             image = image.copy()
-            for res in results:
+            for res in faces:
                 x1, y1, x2, y2 = res["bbox"]
                 prob = res["manipulation_probability"]
                 is_fake = prob >= 0.5
@@ -522,20 +548,60 @@ class MainWindow(QMainWindow):
         # Grad-CAM on its own layer below the boxes, stronger for more suspicious faces
         height, width = self.layers.size
         self._push_history()
-        self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(results, height, width))
+        self.layers.add_layer_on_top("Grad-CAM", *heatmap_layer(faces, height, width))
         self._after_edit()
 
         # Results go on their own layer (undo with Ctrl+Z, or hide/delete the layer)
         self._add_overlay_layer("Deepfake analysis", draw_results)
 
-        fakes = sum(res["manipulation_probability"] >= 0.5 for res in results)
-        self.status_bar.showMessage(f"Deepfake analysis complete: {len(results)} face(s), "
-                                    f"{fakes} likely fake.", 5000)
+        fakes = sum(face["manipulation_probability"] >= 0.5 for face in faces)
+        self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
+                                    f"{len(faces)} face(s), {fakes} likely manipulated.", 8000)
 
     def closeEvent(self, event):
         # Let a running analysis finish before the window (and its thread) is destroyed
         self.analysis_task.wait()
         super().closeEvent(event)
+
+    def cut_faces(self):
+        if self.layers is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return
+        self.status_bar.showMessage("Cutting out faces...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            image = self._composite()  # what the user sees
+            masks = []
+            for (x1, y1, x2, y2) in detect_faces(image):
+                w, h = x2 - x1, y2 - y1
+                box = (x1 - 0.3 * w, y1 - 0.5 * h, x2 + 0.3 * w, y2 + 0.2 * h)
+                try:
+                    masks.append(smart_cut_mask(image, box)[0])
+                except ValueError:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to cut out faces: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not masks:
+            QMessageBox.information(self, "Cut faces", "No faces found in the image.")
+            return
+
+        self._push_history()
+        self.deselect()
+        photo = self.layers.layers[0]
+        height, width = self.layers.size
+        for number, mask in enumerate(masks, start=1):
+            face = paste_img(np.zeros((height, width, 3), np.uint8), image, 0, 0, mask)
+            self.layers.add_layer_on_top(f"Face {number}", face, mask)
+            photo.rgb = fill_mask(photo.rgb, mask, (255, 255, 255))
+            photo.alpha = fill_mask(self._alpha3(photo.alpha), mask, (0, 0, 0))[:, :, 0]
+        self._after_edit()
+
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+        self.status_bar.showMessage(f"Cut out {len(masks)} face(s): drag them with the Hand", 5000)
 
     def _add_overlay_layer(self, name, draw):
         """Put what draw(image) draws on a new transparent layer at the top."""
@@ -565,6 +631,9 @@ class MainWindow(QMainWindow):
                                  self.lasso_tool_act, self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act, self.picker_tool_act,
                                  self.fill_tool_act, self.text_tool_act])
+
+        cut_out = self.ribbon.add_group("Cut out")
+        cut_out.add_large_button(self.cut_faces_act)
 
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
