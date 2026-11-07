@@ -13,7 +13,7 @@ from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
                        TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
                        TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW, TOOL_LASSO,
-                       TOOL_TEXT)
+                       TOOL_TEXT, TOOL_ZOOM)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
@@ -198,6 +198,8 @@ class MainWindow(QMainWindow):
         self.arrow_tool_act = self._add_tool("Arrow", TOOL_ARROW, "arrow", "Arrow: drag to draw")
         self.fill_tool_act = self._add_tool("Fill", TOOL_FILL, "bucket",
                                             "Fill: click inside a shape to fill it with the fill color")
+        self.zoom_tool_act = self._add_tool("Zoom", TOOL_ZOOM, "zoom",
+                                            "Zoom: click to zoom in, right click to zoom out")
         self.text_tool_act = self._add_tool("Text", TOOL_TEXT, "text",
                                             "Text: click where you want to add text, then start typing")
 
@@ -635,7 +637,8 @@ class MainWindow(QMainWindow):
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
                                  self.lasso_tool_act, self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act, self.picker_tool_act,
-                                 self.fill_tool_act, self.text_tool_act])
+                                 self.fill_tool_act, self.text_tool_act,
+                                 self.zoom_tool_act])
 
         cut_out = self.ribbon.add_group("Cut out")
         cut_out.add_large_button(self.cut_faces_act)
