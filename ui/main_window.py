@@ -157,7 +157,8 @@ class MainWindow(QMainWindow):
                                           QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
                                              "Save As (Ctrl+Shift+S)", QKeySequence.StandardKey.SaveAs)
-        self.properties_act = self._make_action("&Properties...", self.show_properties)
+        self.properties_act = self._make_action("&Properties...", self.show_properties, "info",
+                                                "Image properties (size, format...)")
         self.quit_act = self._make_action("&Quit", self.close, "quit", "Quit",
                                           QKeySequence.StandardKey.Quit)
 
