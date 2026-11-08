@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self._placement_buttons = []
 
         self.setWindowTitle("Machine Vision Photo Editor & Deepfake Detector")
+        self._modified = False        # changes not saved yet (shown as "*" in the title)
         self.resize(1280, 760)
 
         # The document is a stack of layers (see ui/layers.py).
@@ -584,7 +585,51 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
                                     f"{len(faces)} face(s), {fakes} likely manipulated.", 8000)
 
+    # ------------------------------------------------------------------
+    # Unsaved changes
+    # ------------------------------------------------------------------
+    def _set_modified(self, modified: bool) -> None:
+        self._modified = modified
+        self._update_title()
+
+    def _update_title(self) -> None:
+        """Title like "photo.png* - Machine Vision Photo Editor & Deepfake Detector" ("*" = changes not saved)."""
+        app = "Machine Vision Photo Editor & Deepfake Detector"
+        if self.layers is None:
+            self.setWindowTitle(app)
+            return
+        name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+        self.setWindowTitle(f"{name}{'*' if self._modified else ''} - {app}")
+
+    def _confirm_discard(self) -> bool:
+        """
+        Before the current image is replaced or the window closed: if there are unsaved
+        changes, ask Save / Don't save / Cancel. Returns True if it is OK to go on.
+        """
+        if self.layers is None or not self._modified:
+            return True
+        name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved changes")
+        box.setText(f"Do you want to save the changes made to \"{name}\"?")
+        box.setInformativeText("If you don't save, your changes will be lost.")
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == save:
+            return self.save_image()      # False if the Save As window was cancelled
+        return clicked == discard
+
     def closeEvent(self, event):
+        self._finish_placement(True)     # an imported image still being placed counts as a change
+        if not self._confirm_discard():
+            event.ignore()               # the user pressed Cancel: keep the window open
+            return
         # Let a running analysis finish before the window (and its thread) is destroyed
         self.analysis_task.wait()
         super().closeEvent(event)
@@ -712,6 +757,7 @@ class MainWindow(QMainWindow):
     def _push_history(self) -> None:
         """Save the current state of all layers (cheap: the arrays are shared, not copied)."""
         self.history.push(self.layers.snapshot())
+        self._set_modified(True)
 
     def _after_edit(self) -> None:
         self._update_display()
@@ -729,6 +775,7 @@ class MainWindow(QMainWindow):
         if previous is None:
             return
         self.layers = previous
+        self._set_modified(True)
         self._after_edit()
         self.status_bar.showMessage("Undo", 2000)
 
@@ -740,6 +787,7 @@ class MainWindow(QMainWindow):
         if following is None:
             return
         self.layers = following
+        self._set_modified(True)
         self._after_edit()
         self.status_bar.showMessage("Redo", 2000)
 
@@ -873,10 +921,12 @@ class MainWindow(QMainWindow):
         layer = self.layers.layers[index]
         if layer.visible != visible:
             layer.visible = visible
+            self._set_modified(True)
             self._update_display()
 
     def _on_layer_opacity_changed(self, index: int, percent: int) -> None:
         self.layers.layers[index].opacity = percent / 100
+        self._set_modified(True)
         self._update_display()
 
     def _on_layer_renamed(self, index: int, name: str) -> None:
@@ -924,6 +974,8 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Image: {w}x{h} px | Layers: {len(self.layers)}")
 
     def new_image(self) -> None:
+        if not self._confirm_discard():
+            return
         # Window with the size (custom or preset formats) and the background colour
         dialog = NewImageDialog(self)
         if dialog.exec() != NewImageDialog.DialogCode.Accepted:
@@ -932,6 +984,7 @@ class MainWindow(QMainWindow):
 
         self.current_image = new_img(width, height, color)
         self.current_file_path = None  # not saved yet -> Save will ask for a file name
+        self._set_modified(False)      # nothing to lose yet in a blank image
         self.history.clear()
         self._update_undo_redo_state()
         self._update_display()
@@ -948,6 +1001,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Image Properties", text)
 
     def open_image(self) -> None:
+        if not self._confirm_discard():
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
         )
@@ -957,6 +1012,7 @@ class MainWindow(QMainWindow):
         try:
             self.current_image = read_img(file_path)
             self.current_file_path = file_path
+            self._set_modified(False)
             # Nouvelle image : on repart d'un historique vide
             self.history.clear()
             self._update_undo_redo_state()
@@ -1061,26 +1117,26 @@ class MainWindow(QMainWindow):
         else:
             self.deselect()
 
-    def save_image(self):
+    def save_image(self) -> bool:
+        """Save (asks for a file name the first time). Returns True if the image was saved."""
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "No image to save.")
-            return
+            return False
 
         if self.current_file_path:
-            self._write_image_to_file(self.current_file_path)
-        else:
-            self.save_image_as()
+            return self._write_image_to_file(self.current_file_path)
+        return self.save_image_as()
 
-    def save_image_as(self):
+    def save_image_as(self) -> bool:
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "No image to save.")
-            return
+            return False
 
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Image As", "", "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;Bitmap (*.bmp)"
         )
         if not file_path:
-            return
+            return False
 
         # Si l'utilisateur n'a pas tapé d'extension, on prend celle du filtre choisi
         if not os.path.splitext(file_path)[1]:
@@ -1094,6 +1150,9 @@ class MainWindow(QMainWindow):
         # On ne retient le nouveau chemin que si l'enregistrement a réussi
         if self._write_image_to_file(file_path):
             self.current_file_path = file_path
+            self._update_title()
+            return True
+        return False
 
     def _write_image_to_file(self, path: str) -> bool:
         """Enregistre l'image courante. Renvoie True si ça a marché."""
@@ -1101,6 +1160,7 @@ class MainWindow(QMainWindow):
             # save_img(image, path) : l'image NumPy d'abord, le chemin ensuite
             # All visible layers are merged into one image when saving
             save_img(self._composite(), path)
+            self._set_modified(False)
             self.status_bar.showMessage(f"Saved: {os.path.basename(path)}")
             return True
         except Exception as e:

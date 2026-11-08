@@ -72,13 +72,13 @@ def load_icon(name: str, color: QColor | None = None, keep_colors: bool = False)
     if os.path.exists(png_path):
         return QIcon(png_path)  # les PNG sont gardés tels quels
 
-    print(f"[ERREUR] Fichier introuvable pour '{name}' dans {assets_dir}")
+    print(f"[WARNING] Icon file not found for '{name}' in {assets_dir}")
     return None
 
 def numpy_to_qimage(array: np.ndarray) -> QImage:
     """Convertit un tableau NumPy (H, W, 3) RGB uint8 en QImage pour affichage."""
     if array is None or array.ndim != 3 or array.shape[2] != 3:
-        raise ValueError("L'image doit être un tableau NumPy de dimension (H, W, 3) RGB.")
+        raise ValueError("The image must be a NumPy array of shape (H, W, 3), RGB.")
 
     # Assure que le tableau est contigu en mémoire pour Qt
     if not array.flags['C_CONTIGUOUS']:
