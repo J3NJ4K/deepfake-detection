@@ -4,7 +4,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication
+    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication, QSplitter
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
                            QGuiApplication)
@@ -157,7 +157,8 @@ class MainWindow(QMainWindow):
                                           QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
                                              "Save As (Ctrl+Shift+S)", QKeySequence.StandardKey.SaveAs)
-        self.properties_act = self._make_action("&Properties...", self.show_properties)
+        self.properties_act = self._make_action("&Properties...", self.show_properties, "info",
+                                                "Image properties (size, format...)")
         self.quit_act = self._make_action("&Quit", self.close, "quit", "Quit",
                                           QKeySequence.StandardKey.Quit)
 
@@ -622,16 +623,20 @@ class MainWindow(QMainWindow):
         self.ribbon = Ribbon(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.ribbon)
 
+        # Detection first: it is the main feature of the app, it must always be visible
+        detection = self.ribbon.add_group("Detection")
+        detection.add_large_button(self.deepfake_act, highlight=True)
+        detection.add_large_button(self.face_detect_act, highlight=True)
+        detection.add_labeled_buttons([self.cut_faces_act, self.results_act], rows=2)
+
         clipboard = self.ribbon.add_group("Clipboard")
-        clipboard.add_large_button(self.paste_act)
-        clipboard.add_small_buttons([self.cut_act, self.copy_act])
+        clipboard.add_small_buttons([self.paste_act, self.cut_act, self.copy_act], rows=3)
 
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
                                  self.flip_h_act, self.flip_v_act,
                                  self.rot_180_act, self.flip_d_act])
-        image.add_large_button(self.resize_act)
-        image.add_large_button(self.adjust_act)
+        image.add_labeled_buttons([self.resize_act, self.adjust_act], rows=2)
 
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
@@ -639,9 +644,6 @@ class MainWindow(QMainWindow):
                                  self.eraser_tool_act, self.picker_tool_act,
                                  self.fill_tool_act, self.text_tool_act,
                                  self.zoom_tool_act])
-
-        cut_out = self.ribbon.add_group("Cut out")
-        cut_out.add_large_button(self.cut_faces_act)
 
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
@@ -655,17 +657,12 @@ class MainWindow(QMainWindow):
         self.color_palette.color_chosen.connect(self._on_palette_color)
         colors.add_widget(self.color_palette)
 
-        layers = self.ribbon.add_group("Layers")
-        layers.add_large_button(self.layers_act)
-
         filters = self.ribbon.add_group("Filters")
         filters.add_small_buttons([self.blur_act, self.sobel_act,
                                    self.threshold_act, self.otsu_act])
 
-        detection = self.ribbon.add_group("Detection")
-        detection.add_large_button(self.face_detect_act)
-        detection.add_large_button(self.deepfake_act)
-        detection.add_large_button(self.results_act)
+        layers = self.ribbon.add_group("Layers")
+        layers.add_large_button(self.layers_act)
 
     def _on_palette_color(self, slot, rgb):
         """A colour was picked in the Colors block (palette or colour wheel)."""
@@ -754,13 +751,22 @@ class MainWindow(QMainWindow):
         self._last_boxes = []      # boxes of the faces listed in the results panel
 
         # Right column = layers panel on top, results panel under it
-        self.side_column = QWidget(self)
+        # (a splitter: drag the bar between the two panels to give more room to one of them)
+        self.side_column = QSplitter(Qt.Orientation.Vertical, self)
         self.side_column.setFixedWidth(220)
-        side = QVBoxLayout(self.side_column)
-        side.setContentsMargins(0, 0, 0, 0)
-        side.setSpacing(0)
-        side.addWidget(self.layers_panel, 1)
-        side.addWidget(self.results_panel, 1)
+        self.side_column.addWidget(self.layers_panel)
+        self.side_column.addWidget(self.results_panel)
+        self.side_column.setStretchFactor(0, 1)
+        self.side_column.setStretchFactor(1, 1)
+        self.side_column.setChildrenCollapsible(False)   # a panel can't be squashed to nothing
+        self.layers_panel.setMinimumHeight(120)
+        self.results_panel.setMinimumHeight(120)
+        self.side_column.setHandleWidth(7)
+        # Visible grip in the middle of the bar (light on dark theme, dark on light theme)
+        dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        grip = "rgba(255, 255, 255, 70)" if dark else "rgba(0, 0, 0, 60)"
+        self.side_column.setStyleSheet(
+            f"QSplitter::handle {{ background-color: {grip}; margin: 2px 70px; border-radius: 1px; }}")
         self.side_column.hide()
 
         # Central area = [ tool options | canvas | right column ]
