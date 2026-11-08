@@ -158,7 +158,7 @@ class MainWindow(QMainWindow):
                                          QKeySequence.StandardKey.New)
         self.open_act = self._make_action("&Open...", self.open_image, "open", "Open an image (Ctrl+O)",
                                           QKeySequence.StandardKey.Open)
-        self.import_act = self._make_action("&Import image...", self.import_image, "import",
+        self.import_act = self._make_action("&Import image...", self.import_image, "file-import",
                                             "Add an image onto the current layer: move, resize and "
                                             "rotate it, then press Enter (Ctrl+Shift+I)", "Ctrl+Shift+I")
         self.place_apply_act = self._make_action("Apply", lambda: self._finish_placement(True), None,
