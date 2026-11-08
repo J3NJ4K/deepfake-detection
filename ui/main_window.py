@@ -4,10 +4,10 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication, QSplitter
+    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication, QSplitter, QToolButton
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
-                           QGuiApplication)
+                           QGuiApplication, QImage)
 from PySide6.QtCore import Qt, QSize, QPointF
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
@@ -28,8 +28,9 @@ from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
 from ui.filter_dialog import FilterDialog
 from ui.results_panel import ResultsPanel
+from ui.placement import Placement
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
-                            flip_diagonal, resize_scale, crop)
+                            flip_diagonal, resize_scale, resize, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
 from core.selection import (selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask,
                             smart_cut_mask)
@@ -60,6 +61,8 @@ GEOMETRIC_OPS = (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_ve
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._placement = None        # imported image being moved / resized / rotated
+        self._placement_buttons = []
 
         self.setWindowTitle("Machine Vision Photo Editor & Deepfake Detector")
         self.resize(1280, 760)
@@ -144,6 +147,8 @@ class MainWindow(QMainWindow):
         if tooltip:
             action.setToolTip(tooltip)
         if slot is not None:
+            # An imported image still being placed is put on its layer before any other command
+            action.triggered.connect(lambda _checked=False, a=action: self._before_command(a))
             action.triggered.connect(slot)
         return action
 
@@ -153,6 +158,16 @@ class MainWindow(QMainWindow):
                                          QKeySequence.StandardKey.New)
         self.open_act = self._make_action("&Open...", self.open_image, "open", "Open an image (Ctrl+O)",
                                           QKeySequence.StandardKey.Open)
+        self.import_act = self._make_action("&Import image...", self.import_image, "import",
+                                            "Add an image onto the current layer: move, resize and "
+                                            "rotate it, then press Enter (Ctrl+Shift+I)", "Ctrl+Shift+I")
+        self.place_apply_act = self._make_action("Apply", lambda: self._finish_placement(True), None,
+                                                 "Put the imported image on the layer (Enter)",
+                                                 [QKeySequence(Qt.Key.Key_Return), QKeySequence(Qt.Key.Key_Enter)])
+        self.place_cancel_act = self._make_action("Cancel", lambda: self._finish_placement(False), None,
+                                                  "Cancel the import (Esc)")
+        self.place_apply_act.setEnabled(False)   # only while an imported image is being placed
+        self.addAction(self.place_apply_act)     # so Enter works without a menu entry
         self.save_act = self._make_action("&Save", self.save_image, "disk", "Save (Ctrl+S)",
                                           QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
@@ -244,7 +259,7 @@ class MainWindow(QMainWindow):
                                                 "Delete the selected area (Del)", QKeySequence.StandardKey.Delete)
         self.select_all_act = self._make_action("Select &All", self.select_all, None,
                                                 "Select the entire image (Ctrl+A)", QKeySequence.StandardKey.SelectAll)
-        self.deselect_act = self._make_action("D&eselect", self.deselect, None, "Deselect (Esc)", "Esc")
+        self.deselect_act = self._make_action("D&eselect", self._escape, None, "Deselect (Esc)", "Esc")
         self._update_color_icon()
         self._update_size_icon()
         self._update_fill_icon()
@@ -252,6 +267,7 @@ class MainWindow(QMainWindow):
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
+        self.canvas.placement_done.connect(self._on_placement_done)
 
         # --- Image ---
         self.rot_ccw_act = self._make_action("Rotate Left", lambda: self._apply_edit(rotate_left),
@@ -289,6 +305,8 @@ class MainWindow(QMainWindow):
                                               "Run Deepfake Analysis")
 
     def _on_tool_clicked(self, action):
+        if self._placement is not None:
+            self._finish_placement(True)   # choosing a tool = done with the imported image
         if action.isChecked():
             tool = action.data()
         else:
@@ -314,6 +332,7 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.new_act)
         file_menu.addAction(self.open_act)
+        file_menu.addAction(self.import_act)
         file_menu.addSeparator()
         file_menu.addAction(self.save_act)
         file_menu.addAction(self.save_as_act)
@@ -702,6 +721,9 @@ class MainWindow(QMainWindow):
     def undo(self) -> None:
         if self.layers is None:
             return
+        if self._placement is not None:   # undo while placing an imported image = cancel it
+            self._finish_placement(False)
+            return
         self.deselect()
         previous = self.history.undo(self.layers.snapshot())
         if previous is None:
@@ -945,6 +967,99 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Loaded: {os.path.basename(file_path)}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
+
+    def import_image(self) -> None:
+        """
+        Add an image file onto the ACTIVE layer. It first floats above the picture in a
+        frame: drag it to move it, drag a corner / side to resize it, drag the round
+        handle to rotate it. Enter, a click outside or a double-click puts it on the
+        layer; Esc cancels.
+        """
+        if self.layers is None:
+            self.open_image()   # nothing open yet: importing an image = opening it
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
+        )
+        if not file_path:
+            return
+        try:
+            piece = read_img(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import image: {e}")
+            return
+
+        self.deselect()
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+
+        # Start centred, and smaller if it does not fit (keeping its proportions)
+        height, width = self.layers.size
+        piece_h, piece_w = piece.shape[:2]
+        scale = min(1.0, width / piece_w, height / piece_h)
+        alpha = np.full((piece_h, piece_w), 255, np.uint8)
+        self._placement = Placement(piece, alpha, (width / 2, height / 2), (piece_w * scale, piece_h * scale))
+
+        rgba = np.ascontiguousarray(np.dstack([piece, alpha]))
+        image = QImage(rgba.data, piece_w, piece_h, 4 * piece_w, QImage.Format.Format_RGBA8888).copy()
+        layer = self.layers.active_layer
+        self.canvas.start_placement(self._placement, QPixmap.fromImage(image), layer.opacity)
+        self.place_apply_act.setEnabled(True)
+        self._show_placement_buttons(True)
+
+        hidden = "  (this layer is hidden!)" if not layer.visible else ""
+        self.status_bar.showMessage(
+            f"Placing {os.path.basename(file_path)} on layer \"{layer.name}\"{hidden}: drag to move, "
+            "corners to resize (Shift: free), round handle to rotate (Shift: 15° steps). "
+            "Enter = apply, Esc = cancel.")
+
+    def _show_placement_buttons(self, visible: bool) -> None:
+        """Apply / Cancel buttons in the status bar while an imported image is placed."""
+        if not self._placement_buttons:
+            for action in (self.place_apply_act, self.place_cancel_act):
+                button = QToolButton()
+                button.setDefaultAction(action)
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+                self.status_bar.addPermanentWidget(button)
+                self._placement_buttons.append(button)
+        for button in self._placement_buttons:
+            button.setVisible(visible)
+
+    def _on_placement_done(self) -> None:
+        self._finish_placement(True)
+
+    def _finish_placement(self, apply: bool) -> None:
+        """Put the imported image on the active layer (apply=True) or drop it."""
+        placement, self._placement = self._placement, None
+        if placement is None:
+            return
+        self.canvas.end_placement()
+        self.place_apply_act.setEnabled(False)
+        self._show_placement_buttons(False)
+        if not apply or self.layers is None:
+            self.status_bar.showMessage("Import cancelled", 3000)
+            return
+        layer = self.layers.active_layer
+        rgb, alpha = placement.apply_to(layer.rgb, layer.alpha)
+        self._push_history()
+        layer.rgb, layer.alpha = rgb, alpha
+        self._after_edit()
+        self.status_bar.showMessage(f"Image added to layer \"{layer.name}\" (Ctrl+Z to undo)", 4000)
+
+    def _before_command(self, action) -> None:
+        if self._placement is None:
+            return
+        keep_placing = (self.undo_act, self.deselect_act, self.place_apply_act, self.place_cancel_act,
+                        self.color_act, self.size_act, self.fill_color_act)
+        if action not in keep_placing:
+            self._finish_placement(True)
+
+    def _escape(self) -> None:
+        """Esc: cancel the image being imported, otherwise remove the selection."""
+        if self._placement is not None:
+            self._finish_placement(False)
+        else:
+            self.deselect()
 
     def save_image(self):
         if self.current_image is None:
