@@ -7,7 +7,7 @@ _detector = None
 
 MAX_SIDE = 1280  # YuNet splits up or misses faces that are too large
 
-def detect_faces(image: np.ndarray, score_threshold: float = 0.9) -> list[tuple[int, int, int, int]]:
+def detect_faces(image: np.ndarray, score_threshold: float = 0.75) -> list[tuple[int, int, int, int]]:
 
     global _detector
     h, w = image.shape[:2]
