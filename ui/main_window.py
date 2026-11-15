@@ -23,7 +23,7 @@ from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
 from ui.adjust_dialog import AdjustDialog
 from core.adjust import brightness_contrast
-from ui.text_tool import TextDialog, render_text_layer
+from ui.text_tool import TextEditor
 from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
 from ui.filter_dialog import FilterDialog
@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._placement = None        # imported image being moved / resized / rotated
+        self._text_editor = None      # text being typed on the image (ui.text_tool)
         self._placement_buttons = []
 
         self.setWindowTitle("Machine Vision Photo Editor & Deepfake Detector")
@@ -306,6 +307,8 @@ class MainWindow(QMainWindow):
                                               "Run Deepfake Analysis")
 
     def _on_tool_clicked(self, action):
+        if self._text_editor is not None:
+            self._finish_text(True)        # choosing a tool = done with the text
         if self._placement is not None:
             self._finish_placement(True)   # choosing a tool = done with the imported image
         if action.isChecked():
@@ -626,6 +629,7 @@ class MainWindow(QMainWindow):
         return clicked == discard
 
     def closeEvent(self, event):
+        self._finish_text(True)          # a text being typed counts as a change too
         self._finish_placement(True)     # an imported image still being placed counts as a change
         if not self._confirm_discard():
             event.ignore()               # the user pressed Cancel: keep the window open
@@ -733,6 +737,8 @@ class MainWindow(QMainWindow):
         if slot == SLOT_COLOR:
             self.brush_color = tuple(rgb)
             self._update_color_icon()
+            if self._text_editor is not None:
+                self._text_editor.set_color(self.brush_color)
         else:
             self.fill_color = tuple(rgb)
             self._update_fill_icon()
@@ -766,6 +772,9 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         if self.layers is None:
+            return
+        if self._text_editor is not None:  # undo while typing a text (from the button) = cancel it
+            self._finish_text(False)
             return
         if self._placement is not None:   # undo while placing an imported image = cancel it
             self._finish_placement(False)
@@ -1103,6 +1112,9 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Image added to layer \"{layer.name}\" (Ctrl+Z to undo)", 4000)
 
     def _before_command(self, action) -> None:
+        if self._text_editor is not None and action not in (self.undo_act, self.deselect_act,
+                                                            self.color_act, self.size_act):
+            self._finish_text(True)        # a text being typed is applied before any other command
         if self._placement is None:
             return
         keep_placing = (self.undo_act, self.deselect_act, self.place_apply_act, self.place_cancel_act,
@@ -1111,8 +1123,10 @@ class MainWindow(QMainWindow):
             self._finish_placement(True)
 
     def _escape(self) -> None:
-        """Esc: cancel the image being imported, otherwise remove the selection."""
-        if self._placement is not None:
+        """Esc: apply the text being typed, cancel the image being imported, or remove the selection."""
+        if self._text_editor is not None:
+            self._finish_text(True)
+        elif self._placement is not None:
             self._finish_placement(False)
         else:
             self.deselect()
@@ -1321,58 +1335,36 @@ class MainWindow(QMainWindow):
 # Text tool
 
     def _add_text(self, pos):
+        """Text tool: a click starts a text on the image; a click outside it applies it."""
         if self.layers is None:
             return
+        if self._text_editor is not None:
+            self._finish_text(True)
+            return
+        self.deselect()
+        self._text_editor = TextEditor(self.canvas, pos, self.brush_color, self)
+        self._text_editor.finished.connect(self._finish_text)
+        self.status_bar.showMessage("Type your text. Esc or a click outside applies it.")
+
+    def _finish_text(self, apply: bool) -> None:
+        """Put the typed text on a new layer (apply=True) or drop it."""
+        editor, self._text_editor = self._text_editor, None
+        if editor is None:
+            return
         height, width = self.layers.size
-        photo = self._composite()
-        dialog = TextDialog(self)
-
-        def preview():
-            text, size, style = dialog.current()
-            if text.strip():
-                rgb, alpha = render_text_layer(text, pos.x(), pos.y(), size, self.brush_color,
-                                               width, height, **style)
-                if alpha.any():
-                    a = alpha[:, :, None].astype(np.float32) / 255.0
-                    self._show_image((photo * (1 - a) + rgb * a).astype(np.uint8))
-                    left, top, right, bottom = mask_box(alpha)
-                    self.canvas.show_selection(QPointF(left - 4, top - 4), QPointF(right + 4, bottom + 4))
-                    return
-            self._show_image(photo)
-            self.canvas.show_selection(QPointF(pos.x() - 2, pos.y()), QPointF(pos.x() + 2, pos.y() + size))
-
-        dialog.changed.connect(preview)
-        preview()
-
-        spot = self.canvas.viewport().mapToGlobal(self.canvas.mapFromScene(pos))
-        dialog.adjustSize()
-        screen = self.screen().availableGeometry()
-        x = min(max(screen.left(), spot.x()), screen.right() - dialog.width())
-        y = spot.y() + int(dialog.current()[1] * self.canvas.transform().m11()) + 30
-        if y + dialog.height() > screen.bottom():
-            y = max(screen.top(), spot.y() - dialog.height() - 30)
-        dialog.move(x, y)
-
-        accepted = dialog.exec() == TextDialog.DialogCode.Accepted
-        self.canvas.clear_selection()
-        self._update_display()
-        if not accepted:
+        result = editor.render(width, height) if apply else None
+        text = editor.text()
+        editor.close()
+        self.status_bar.clearMessage()
+        if result is None:
+            if apply and text.strip():
+                self.status_bar.showMessage("The text is outside the image", 3000)
             return
-        text, size, style = dialog.values()
-        if not text.strip():
-            return
-        rgb, alpha = render_text_layer(text, pos.x(), pos.y(), size, self.brush_color,
-                                       width, height, **style)
-        if not alpha.any():
-            self.status_bar.showMessage("The text is outside the image", 3000)
-            return
+        rgb, alpha = result
         self._push_history()
         self.layers.add_layer_on_top(f"Text: {text.strip().splitlines()[0][:20]}", rgb, alpha)
         self._after_edit()
-        # Switch to the Hand so the text can be dragged right away
-        self.hand_tool_act.setChecked(True)
-        self._on_tool_clicked(self.hand_tool_act)
-        self.status_bar.showMessage("Text added! Use the hand tool to move it.", 4000)
+        self.status_bar.showMessage("Text added on a new layer. Use the Hand to move it.", 4000)
 
     def adjust_brightness_contrast(self):
         if self.layers is None:
@@ -1440,6 +1432,8 @@ class MainWindow(QMainWindow):
         if color.isValid():  # False if the user pressed Cancel
             self.brush_color = (color.red(), color.green(), color.blue())
             self._update_color_icon()
+            if self._text_editor is not None:
+                self._text_editor.set_color(self.brush_color)
 
     def choose_brush_size(self):
         size, ok = QInputDialog.getInt(self, "Size", "Size (px):", self.brush_size, 1, 200)

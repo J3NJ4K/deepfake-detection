@@ -113,6 +113,8 @@ class ImageCanvas(QGraphicsView):
             self.setBackgroundBrush(QColor(32, 32, 32))
 
         self._placement = None        # ui.placement.Placement being transformed, or None
+        self.text_item = None         # text being typed (set by ui.text_tool.TextEditor)
+        self._text_mouse = False      # True while a click that started in the text is held
         self._placement_items = {}
         self.zoom_changed.connect(lambda _: self._update_placement())
 
@@ -326,7 +328,20 @@ class ImageCanvas(QGraphicsView):
             return True
         return False
 
+    # ------------------------------------------------------------------
+    # Text being typed: clicks inside it go to the text (cursor, selection)
+    # ------------------------------------------------------------------
+    def _on_text(self, event: QMouseEvent) -> bool:
+        if self.text_item is None:
+            return False
+        pad = 4 / max(self._current_zoom, 0.01)
+        rect = self.text_item.sceneBoundingRect().adjusted(-pad, -pad, pad, pad)
+        return rect.contains(self._image_pos(event))
+
     def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if self._on_text(event):
+            super().mouseDoubleClickEvent(event)   # double-click = select a word
+            return
         if self._placement is not None and event.button() == Qt.MouseButton.LeftButton:
             if self._placement_hit(event) == MOVE:
                 self._placement.end_drag()
@@ -338,6 +353,10 @@ class ImageCanvas(QGraphicsView):
     def mousePressEvent(self, event: QMouseEvent):
         if self._placement is not None and self._placement_press(event):
             event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._on_text(event):
+            self._text_mouse = True
+            super().mousePressEvent(event)         # the text item places its cursor
             return
         # Zoom tool: left click = zoom in, right click = zoom out
 
@@ -366,6 +385,9 @@ class ImageCanvas(QGraphicsView):
         if self._placement is not None and self._placement_move(event):
             event.accept()
             return
+        if self._text_mouse:
+            super().mouseMoveEvent(event)          # selecting text with the mouse
+            return
         if self._grabbing:
             self.tool_dragged.emit(TOOL_SELECT, self._image_pos(event))
             event.accept()
@@ -381,6 +403,10 @@ class ImageCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self._placement is not None and self._placement_release(event):
             event.accept()
+            return
+        if self._text_mouse and event.button() == Qt.MouseButton.LeftButton:
+            self._text_mouse = False
+            super().mouseReleaseEvent(event)
             return
         if self._grabbing and event.button() == Qt.MouseButton.LeftButton:
             self._grabbing = False
