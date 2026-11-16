@@ -1,7 +1,17 @@
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsPathItem
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
+                               QGraphicsPathItem, QGraphicsPolygonItem, QGraphicsLineItem, QGraphicsEllipseItem,
+                               QGraphicsItem)
 from PySide6.QtGui import (QPixmap, QPainter, QWheelEvent, QTransform, QMouseEvent, QPen, QColor, QCursor,
                            QPainterPath, QPolygonF, QPalette)
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF
+
+from ui.placement import HANDLES, ROTATE, MOVE
+
+# Free transform of an imported image (sizes in SCREEN pixels, whatever the zoom)
+PLACEMENT_HANDLE = 8          # side of the square handles
+PLACEMENT_TOLERANCE = 7       # how close the mouse must be to grab a handle
+PLACEMENT_ROTATE_DISTANCE = 28
+PLACEMENT_COLOR = QColor(0, 120, 215)
 
 # Noms des outils (utilisés par la barre d'outils et par le canvas)
 TOOL_HAND = "hand"      # déplacer / faire défiler l'image (outil par défaut)
@@ -20,6 +30,8 @@ TOOL_DIAMOND = "diamond"
 TOOL_STAR = "star"
 TOOL_ARROW = "arrow"
 TOOL_LASSO = "lasso"
+TOOL_ZOOM = "zoom"
+TOOL_TEXT = "text"
 
 class ImageCanvas(QGraphicsView):
     # Signal émis quand le niveau de zoom change (en pourcentage entier)
@@ -33,6 +45,10 @@ class ImageCanvas(QGraphicsView):
     tool_pressed = Signal(str, QPointF)
     tool_dragged = Signal(str, QPointF)
     tool_released = Signal(str, QPointF)
+
+    # Free transform of an imported image: emitted when the user clicks outside it or
+    # double-clicks it (= "I am done, put it on the layer")
+    placement_done = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -96,12 +112,16 @@ class ImageCanvas(QGraphicsView):
         else:                             # dark theme
             self.setBackgroundBrush(QColor(32, 32, 32))
 
+        self._placement = None        # ui.placement.Placement being transformed, or None
+        self.text_item = None         # text being typed (set by ui.text_tool.TextEditor)
+        self._text_mouse = False      # True while a click that started in the text is held
+        self._placement_items = {}
+        self.zoom_changed.connect(lambda _: self._update_placement())
+
         self._tool = TOOL_HAND
         self.set_tool(TOOL_HAND)
 
-    # ------------------------------------------------------------------
     # Outils
-    # ------------------------------------------------------------------
     @property
     def tool(self) -> str:
         return self._tool
@@ -121,12 +141,32 @@ class ImageCanvas(QGraphicsView):
 
     def _update_cursor(self) -> None:
         self._hover_grab = False
+        if getattr(self, "_placement", None) is not None:
+            return              # the free transform chooses its own cursors
         if self._tool == TOOL_HAND:
             self.viewport().unsetCursor()
         elif self._tool == TOOL_ERASER:
             self.viewport().setCursor(self._eraser_cursor())
+        elif self._tool == TOOL_ZOOM:
+            self.viewport().setCursor(self._zoom_cursor())
+        elif self._tool == TOOL_TEXT:
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         else:
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+
+    def _zoom_cursor(self) -> QCursor:
+        pixmap = QPixmap(26, 26)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for color, width in ((QColor(255, 255, 255), 4), (QColor(30, 30, 30), 2)):
+            painter.setPen(QPen(color, width))
+            painter.drawEllipse(2, 2, 15, 15)
+            painter.drawLine(15, 15, 23, 23)
+            painter.drawLine(6, 10, 13, 10)
+            painter.drawLine(10, 6, 10, 13)
+        painter.end()
+        return QCursor(pixmap, 10, 10)
 
     def _eraser_cursor(self) -> QCursor:
         diameter = int(round(self._brush_size * self._current_zoom))
@@ -168,7 +208,162 @@ class ImageCanvas(QGraphicsView):
             else:
                 self._update_cursor()
 
+
+    # Free transform: Move, resize, and rotate an imported image.
+    def start_placement(self, placement, pixmap: QPixmap, opacity: float = 1.0) -> None:
+        self.end_placement()
+        self._placement = placement
+
+        piece = QGraphicsPixmapItem(pixmap)
+        piece.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        piece.setOpacity(opacity)
+        piece.setZValue(0.5)
+
+        pen = QPen(PLACEMENT_COLOR, 1.5)
+        pen.setCosmetic(True)         #same thickness whatever the zoom
+        frame = QGraphicsPolygonItem()
+        frame.setPen(pen)
+        frame.setZValue(3)
+        line = QGraphicsLineItem()
+        line.setPen(pen)
+        line.setZValue(3)
+
+        items = {"piece": piece, "frame": frame, "line": line}
+        half = PLACEMENT_HANDLE / 2
+        for name in list(HANDLES) + [ROTATE]:
+            if name == ROTATE:
+                handle = QGraphicsEllipseItem(-half - 1, -half - 1, PLACEMENT_HANDLE + 2, PLACEMENT_HANDLE + 2)
+            else:
+                handle = QGraphicsRectItem(-half, -half, PLACEMENT_HANDLE, PLACEMENT_HANDLE)
+            handle.setPen(pen)
+            handle.setBrush(QColor(255, 255, 255))
+
+            # The handles stay the same size on the screen, even when zooming in or out.
+            handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+            handle.setZValue(4)
+            items[name] = handle
+        for item in items.values():
+            self._scene.addItem(item)
+        self._placement_items = items
+        self._update_placement()
+        self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def end_placement(self) -> None:
+        """Remove the frame and handles (MainWindow has already used or dropped the image)."""
+        for item in self._placement_items.values():
+            self._scene.removeItem(item)
+        self._placement_items = {}
+        self._placement = None
+        self._update_cursor()
+
+    def is_placing(self) -> bool:
+        return self._placement is not None
+
+    def _rotate_distance(self) -> float:
+        return PLACEMENT_ROTATE_DISTANCE / self._current_zoom
+
+    def _update_placement(self) -> None:
+        placement = self._placement
+        if placement is None:
+            return
+        m = placement.transform_matrix()
+        items = self._placement_items
+        items["piece"].setTransform(QTransform(m[0, 0], m[1, 0], m[0, 1], m[1, 1], m[0, 2], m[1, 2]))
+        items["frame"].setPolygon(QPolygonF([QPointF(x, y) for x, y in placement.corners()]))
+        points = placement.handle_points(self._rotate_distance())
+        for name, (x, y) in points.items():
+            items[name].setPos(x, y)
+        items["line"].setLine(*points["n"], *points[ROTATE])
+
+    def _placement_hit(self, event: QMouseEvent):
+        pos = self._image_pos(event)
+        tolerance = PLACEMENT_TOLERANCE / self._current_zoom
+        return self._placement.hit_test(pos.x(), pos.y(), tolerance, self._rotate_distance())
+
+    def _placement_cursor(self, kind) -> None:
+        if kind == MOVE:
+            shape = Qt.CursorShape.SizeAllCursor
+        elif kind == ROTATE:
+            shape = Qt.CursorShape.PointingHandCursor
+        elif kind in HANDLES:
+
+            # Pick the double arrow closest to the direction of the (maybe rotated) handle
+            step = round((self._placement.handle_direction(kind) % 180) / 45) % 4
+            shape = [Qt.CursorShape.SizeHorCursor, Qt.CursorShape.SizeFDiagCursor,
+                     Qt.CursorShape.SizeVerCursor, Qt.CursorShape.SizeBDiagCursor][step]
+        else:
+            shape = Qt.CursorShape.ArrowCursor
+        self.viewport().setCursor(shape)
+
+    def _placement_press(self, event: QMouseEvent) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        kind = self._placement_hit(event)
+        if kind is None:
+            self.placement_done.emit()
+        else:
+            pos = self._image_pos(event)
+            self._placement.start_drag(kind, pos.x(), pos.y())
+        return True
+
+    def _placement_move(self, event: QMouseEvent) -> bool:
+        placement = self._placement
+        if placement.is_dragging():
+            pos = self._image_pos(event)
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            placement.drag_to(pos.x(), pos.y(), shift)
+            self._update_placement()
+            return True
+        if event.buttons() == Qt.MouseButton.NoButton:
+            self._placement_cursor(self._placement_hit(event))
+            return True
+        return False
+
+    def _placement_release(self, event: QMouseEvent) -> bool:
+        if event.button() == Qt.MouseButton.LeftButton and self._placement.is_dragging():
+            self._placement.end_drag()
+            self._placement_cursor(self._placement_hit(event))
+            return True
+        return False
+
+    # While typing text, clicking inside the text box lets users move the cursor or select text
+    def _on_text(self, event: QMouseEvent) -> bool:
+        if self.text_item is None:
+            return False
+        pad = 4 / max(self._current_zoom, 0.01)
+        rect = self.text_item.sceneBoundingRect().adjusted(-pad, -pad, pad, pad)
+        return rect.contains(self._image_pos(event))
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if self._on_text(event):
+            super().mouseDoubleClickEvent(event)
+            return
+        if self._placement is not None and event.button() == Qt.MouseButton.LeftButton:
+            if self._placement_hit(event) == MOVE:
+                self._placement.end_drag()
+                self.placement_done.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event: QMouseEvent):
+        if self._placement is not None and self._placement_press(event):
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._on_text(event):
+            self._text_mouse = True
+            super().mousePressEvent(event)
+            return
+
+        # Zoom tool: left click = zoom in, right click = zoom out
+        if self._tool == TOOL_ZOOM and not self._pixmap_item.pixmap().isNull():
+            if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+                spot = self._image_pos(event)
+                factor = 1.25 if event.button() == Qt.MouseButton.LeftButton else 1 / 1.25
+                self.apply_zoom(self._current_zoom * factor)
+                self.centerOn(spot)
+                event.accept()
+                return
         if (event.button() == Qt.MouseButton.LeftButton and self._tool in (TOOL_HAND, TOOL_SELECT, TOOL_LASSO)
                 and self._over_selection(event)):
             self._grabbing = True
@@ -183,6 +378,12 @@ class ImageCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._placement is not None and self._placement_move(event):
+            event.accept()
+            return
+        if self._text_mouse:
+            super().mouseMoveEvent(event)
+            return
         if self._grabbing:
             self.tool_dragged.emit(TOOL_SELECT, self._image_pos(event))
             event.accept()
@@ -196,9 +397,15 @@ class ImageCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._placement is not None and self._placement_release(event):
+            event.accept()
+            return
+        if self._text_mouse and event.button() == Qt.MouseButton.LeftButton:
+            self._text_mouse = False
+            super().mouseReleaseEvent(event)
+            return
         if self._grabbing and event.button() == Qt.MouseButton.LeftButton:
             self._grabbing = False
-            self.grab_check = None
             self.tool_released.emit(TOOL_SELECT, self._image_pos(event))
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
@@ -239,9 +446,8 @@ class ImageCanvas(QGraphicsView):
         self._selection_item.hide()
         self._lasso_item.hide()
 
-    # ------------------------------------------------------------------
+
     # Affichage et zoom
-    # ------------------------------------------------------------------
     def set_pixmap(self, pixmap: QPixmap):
         """Met à jour l'image affichée."""
         self._pixmap_item.setPixmap(pixmap)
@@ -252,12 +458,13 @@ class ImageCanvas(QGraphicsView):
         """Ctrl + molette : zoom centré sur la souris. Sans Ctrl : défilement normal."""
         if (event.modifiers() & Qt.KeyboardModifier.ControlModifier
                 and not self._pixmap_item.pixmap().isNull()):
-            steps = event.angleDelta().y() / 120   # one notch of the wheel = 120
+            steps = event.angleDelta().y() / 120
             if steps:
                 cursor = event.position().toPoint()
-                before = self.mapToScene(cursor)               # image point under the mouse
+                before = self.mapToScene(cursor)
                 self.apply_zoom(self._current_zoom * (1.25 ** steps))
                 after = self.mapToScene(cursor)
+
                 # Scroll so that the same image point stays under the mouse
                 shift = (before - after) * self._current_zoom
                 h, v = self.horizontalScrollBar(), self.verticalScrollBar()

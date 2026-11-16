@@ -1,17 +1,3 @@
-"""
-"New image" window:
-
-    Preset:       [ Full HD — 1920 × 1080        ▾ ]
-    Resolution:   [ 300 DPI ▾ ]          (only for paper formats)
-    Width:        [ 1920 px ]
-    Height:       [ 1080 px ]
-    Orientation:  (•) Landscape  ( ) Portrait
-    Background:   [ White ] [ Black ] [ Other... ]   ■
-                                     [ Cancel ] [ OK ]
-
-Typing a width or height switches the preset to "Custom".
-"""
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
@@ -19,9 +5,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QRadioButton, QSpinBox, QVBoxLayout,
 )
 
-MAX_SIZE = 10000  # pixels
+MAX_SIZE = 10000
 
-# (name, width, height) in pixels
+#name, width, height in pixels
 SCREEN_PRESETS = [
     ("HD", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -32,7 +18,7 @@ SCREEN_PRESETS = [
     ("Classic 4:3", 1024, 768),
 ]
 
-# (name, width, height) in millimetres, portrait
+#name, width, height in millimetres, portrait
 PAPER_PRESETS = [
     ("A3", 297, 420),
     ("A4", 210, 297),
@@ -62,13 +48,13 @@ class NewImageDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("New image")
         self._color = (255, 255, 255)
-        self._updating = False   # True while the code itself changes the fields
+        self._updating = False
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
 
-        # --- preset formats
+        # preset formats
         self.preset = QComboBox()
         self.preset.addItem("Custom", None)
         self.preset.insertSeparator(self.preset.count())
@@ -80,7 +66,7 @@ class NewImageDialog(QDialog):
         self.preset.currentIndexChanged.connect(self._on_preset_chosen)
         form.addRow("Preset:", self.preset)
 
-        # --- resolution, used to convert paper sizes to pixels
+        # resolution, used to convert paper sizes to pixels
         self.dpi = QComboBox()
         for dpi in DPI_CHOICES:
             label = f"{dpi} DPI" + {72: " (screen)", 150: " (draft print)", 300: " (print quality)"}[dpi]
@@ -89,13 +75,13 @@ class NewImageDialog(QDialog):
         self.dpi.currentIndexChanged.connect(self._apply_preset)
         form.addRow("Resolution:", self.dpi)
 
-        # --- size in pixels (always editable)
+        # size in pixels
         self.width_box = self._size_box(width)
         self.height_box = self._size_box(height)
         form.addRow("Width:", self.width_box)
         form.addRow("Height:", self.height_box)
 
-        # --- orientation
+        #orientation
         orientation = QHBoxLayout()
         self.landscape = QRadioButton("Landscape")
         self.portrait = QRadioButton("Portrait")
@@ -109,7 +95,7 @@ class NewImageDialog(QDialog):
         orientation.addStretch()
         form.addRow("Orientation:", orientation)
 
-        # --- background colour
+        #background color
         background = QHBoxLayout()
         for text, rgb in (("White", (255, 255, 255)), ("Black", (0, 0, 0))):
             button = QPushButton(text)
@@ -120,12 +106,11 @@ class NewImageDialog(QDialog):
         background.addWidget(other)
         self.swatch = QLabel()
         self.swatch.setFixedSize(30, 24)
-        self.swatch.setFrameShape(QFrame.Shape.Box)   # border, so white stays visible
+        self.swatch.setFrameShape(QFrame.Shape.Box)
         background.addWidget(self.swatch)
         background.addStretch()
         form.addRow("Background:", background)
 
-        # --- OK / Cancel
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -135,12 +120,10 @@ class NewImageDialog(QDialog):
         self._select_matching_preset(width, height)
         self._update_dpi_state()
 
-    # ------------------------------------------------------------------
     def values(self) -> tuple[int, int, tuple[int, int, int]]:
         """(width, height, background colour) chosen by the user."""
         return self.width_box.value(), self.height_box.value(), self._color
 
-    # ------------------------------------------------------------------
     def _size_box(self, value: int) -> QSpinBox:
         box = QSpinBox()
         box.setRange(1, MAX_SIZE)
@@ -158,7 +141,7 @@ class NewImageDialog(QDialog):
     def _apply_preset(self, *_):
         data = self.preset.currentData()
         self._update_dpi_state()
-        if data is None:      # "Custom": keep the current numbers
+        if data is None:
             return
         unit, w, h = data
         if unit == "mm":
@@ -167,8 +150,6 @@ class NewImageDialog(QDialog):
         self._set_size(*oriented(w, h, self.landscape.isChecked()))
 
     def _on_preset_chosen(self, *_):
-        # A newly chosen format starts in its natural orientation
-        # (portrait for paper, landscape for screens); the buttons can swap it after.
         data = self.preset.currentData()
         if data is not None:
             self._set_orientation(data[1] > data[2])
@@ -188,7 +169,6 @@ class NewImageDialog(QDialog):
     def _on_size_typed(self, *_):
         if self._updating:
             return
-        # The user typed a size by hand -> it is a custom size now
         self.preset.blockSignals(True)
         self.preset.setCurrentIndex(0)
         self.preset.blockSignals(False)

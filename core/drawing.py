@@ -45,7 +45,7 @@ def _shape_points(shape, left, top, right, bottom):
         pts = [(cx, top), (right, cy), (cx, bottom), (left, cy)]
     elif shape == "star":
         pts = []
-        for i in range(10):  # 5 outer points and 5 inner points, taking turns
+        for i in range(10):
             angle = -np.pi / 2 + i * np.pi / 5
             r = 1.0 if i % 2 == 0 else 0.4
             pts.append((cx + r * w / 2 * np.cos(angle), cy + r * h / 2 * np.sin(angle)))

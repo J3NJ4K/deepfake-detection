@@ -1,19 +1,3 @@
-"""
-"Colors" block of the ribbon, like Paint:
-
-    (●)  (○)   ● ● ● ● ● ● ● ● ● ●    (colour wheel)
-   Color Fill  ○ ● ● ● ● ● ● ● ● ●
-
-- The two big circles are the two current colours:
-    Color = brush, lines and shape outlines
-    Fill  = fill tool (bucket)
-  Click one to choose which colour the palette changes (it gets highlighted).
-- Click a small circle to give that colour to the selected big circle.
-- The colour wheel opens the full colour picker for the selected big circle.
-
-The widget only shows colours and emits color_chosen(slot, rgb); MainWindow keeps them.
-"""
-
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPalette
 from PySide6.QtWidgets import (
@@ -23,10 +7,10 @@ from PySide6.QtWidgets import (
 
 from ui.utils import load_icon
 
-SLOT_COLOR = 0   # brush / outlines
+SLOT_COLOR = 0   # brush
 SLOT_FILL = 1    # fill tool
 
-# Classic Paint palette: first row dark colours, second row light colours
+# Classic Paint color palette: dark colors on the top row and light colors on the bottom row
 BASIC_COLORS = [
     [(0, 0, 0), (127, 127, 127), (136, 0, 21), (237, 28, 36), (255, 127, 39),
      (255, 242, 0), (34, 177, 76), (0, 162, 232), (63, 72, 204), (163, 73, 164)],
@@ -36,7 +20,7 @@ BASIC_COLORS = [
 
 
 def circle_icon(rgb, diameter: int, border: QColor) -> QIcon:
-    """A filled circle with a thin border (so white stays visible on a light theme)."""
+    """A filled circle with a thin outline to keep it visible on a light background."""
     size = diameter + 2
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -50,7 +34,7 @@ def circle_icon(rgb, diameter: int, border: QColor) -> QIcon:
 
 
 class ColorPalette(QWidget):
-    color_chosen = Signal(int, tuple)   # slot (SLOT_COLOR / SLOT_FILL), (r, g, b)
+    color_chosen = Signal(int, tuple)
 
     def __init__(self, color=(0, 0, 0), fill=(255, 255, 255), parent=None):
         super().__init__(parent)
@@ -61,7 +45,7 @@ class ColorPalette(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # --- the two current colours (big circles), one of them selected
+        # show the two current colors as large circles, with one selected.
         self._slot_group = QButtonGroup(self)
         self._slot_group.setExclusive(True)
         self._slot_buttons = []
@@ -79,12 +63,12 @@ class ColorPalette(QWidget):
             column.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
             label = QLabel(name)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setEnabled(False)   # small grey text, like the group titles
+            label.setEnabled(False)
             column.addWidget(label)
             layout.addLayout(column)
         self._slot_buttons[SLOT_COLOR].setChecked(True)
 
-        # --- basic colours (small circles)
+        #basic colors (small circles)
         grid = QGridLayout()
         grid.setSpacing(2)
         for row, colors in enumerate(BASIC_COLORS):
@@ -98,7 +82,7 @@ class ColorPalette(QWidget):
                 grid.addWidget(button, row, col)
         layout.addLayout(grid)
 
-        # --- colour wheel = full colour picker (its own colours are kept)
+        #color wheel opens a full color picker and keeps its own selected colors
         self._wheel = QToolButton()
         self._wheel.setAutoRaise(True)
         self._wheel.setIconSize(QSize(30, 30))
@@ -113,12 +97,10 @@ class ColorPalette(QWidget):
 
         self._refresh_slots()
 
-    # ------------------------------------------------------------------
     def selected_slot(self) -> int:
         return self._slot_group.checkedId()
 
     def set_color(self, slot: int, rgb) -> None:
-        """Show a colour in a big circle without emitting color_chosen."""
         self._colors[slot] = tuple(rgb)
         self._refresh_slots()
 
@@ -135,5 +117,5 @@ class ColorPalette(QWidget):
         slot = self.selected_slot()
         title = "Color" if slot == SLOT_COLOR else "Fill color"
         color = QColorDialog.getColor(QColor(*self._colors[slot]), self, title)
-        if color.isValid():   # False if the user pressed Cancel
+        if color.isValid():
             self._choose((color.red(), color.green(), color.blue()))

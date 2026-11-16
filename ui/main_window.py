@@ -4,15 +4,16 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QStatusBar, QMessageBox, QToolBar,
     QFileDialog, QWidget, QSizePolicy, QInputDialog,
-    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar
+    QColorDialog, QHBoxLayout, QVBoxLayout, QProgressBar, QApplication, QSplitter, QToolButton
 )
 from PySide6.QtGui import (QAction, QActionGroup, QKeySequence, QPixmap, QColor, QIcon, QPainter, QPalette,
-                           QGuiApplication)
+                           QGuiApplication, QImage)
 from PySide6.QtCore import Qt, QSize, QPointF
 from ui.utils import load_icon, numpy_to_qimage
 from ui.canvas import (ImageCanvas, TOOL_HAND, TOOL_SELECT, TOOL_CROP, TOOL_BRUSH, TOOL_ERASER, TOOL_PICKER,
                        TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE, TOOL_FILL,
-                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW, TOOL_LASSO)
+                       TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW, TOOL_LASSO,
+                       TOOL_TEXT, TOOL_ZOOM)
 from ui.zoom_control import ZoomControl
 from ui.history import ImageHistory
 from ui.ribbon import Ribbon
@@ -20,14 +21,19 @@ from ui.layers import LayerStack, overlay_from_drawing
 from ui.layers_panel import LayersPanel
 from ui.tool_options import ToolOptionsBar
 from ui.color_palette import ColorPalette, SLOT_COLOR, SLOT_FILL
+from ui.adjust_dialog import AdjustDialog
+from core.adjust import brightness_contrast
+from ui.text_tool import TextEditor
 from ui.new_image_dialog import NewImageDialog
 from ui.background_task import BackgroundTask
 from ui.filter_dialog import FilterDialog
 from ui.results_panel import ResultsPanel
+from ui.placement import Placement
 from core.transform import (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_vertical,
-                            flip_diagonal, resize_scale, crop)
+                            flip_diagonal, resize_scale, resize, crop)
 from core.image_io import read_img, save_img, new_img, img_properties
-from core.selection import selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask
+from core.selection import (selection_box, empty_region, paste_img, lasso_mask, mask_box, fill_mask,
+                            smart_cut_mask)
 from core.drawing import draw_brush_stroke, get_pixel_color, draw_shape, flood_fill
 from detection.face_detector import detect_faces
 from detection.pipeline import analyze_deepfake, GENERATED_THRESHOLD
@@ -41,11 +47,6 @@ from core.filters import (
 
 SHAPE_TOOLS = (TOOL_RECT, TOOL_ELLIPSE, TOOL_LINE,
                TOOL_TRIANGLE, TOOL_RIGHT_TRIANGLE, TOOL_DIAMOND, TOOL_STAR, TOOL_ARROW)
-
-# Operations that change the size or orientation of the image: they are applied
-# to ALL layers so that the layers stay aligned. Everything else only changes the
-# active layer.
-# Tools that use the size setting, and the one that uses the opacity setting
 SIZE_TOOLS = (TOOL_BRUSH, TOOL_ERASER) + SHAPE_TOOLS
 OPACITY_TOOLS = (TOOL_BRUSH,)
 
@@ -55,21 +56,20 @@ GEOMETRIC_OPS = (rotate_left, rotate_right, rotate_180, flip_horizontal, flip_ve
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._placement = None
+        self._text_editor = None
+        self._placement_buttons = []
 
         self.setWindowTitle("Machine Vision Photo Editor & Deepfake Detector")
+        self._modified = False
         self.resize(1280, 760)
 
-        # The document is a stack of layers (see ui/layers.py).
-        # self.current_image (property below) = pixels of the ACTIVE layer, NumPy RGB uint8.
         self.layers: LayerStack | None = None
         self._displayed_size = None
         self.current_file_path: str | None = None
 
         # Historique pour Undo / Redo (20 étapes max)
         self.history = ImageHistory(max_steps=20)
-
-        # Composant central (Canvas). It is placed in the window, next to the
-        # layers panel, by _create_layers_panel().
         self.canvas = ImageCanvas(self)
 
         # Barre d'état
@@ -79,19 +79,18 @@ class MainWindow(QMainWindow):
 
         # Moving bar shown in the status bar while an analysis runs in the background
         self.busy_bar = QProgressBar()
-        self.busy_bar.setRange(0, 0)          # no percentage: just "working..."
+        self.busy_bar.setRange(0, 0)
         self.busy_bar.setMaximumWidth(140)
         self.busy_bar.setTextVisible(False)
         self.busy_bar.hide()
         self.status_bar.addPermanentWidget(self.busy_bar)
 
-        # Face detection and deepfake analysis run in a separate thread (window stays usable)
+        # Face detection and deepfake analysis in a separate thread so the window stays responsive
         self.analysis_task = BackgroundTask(self)
-        self._analysis_size = None   # image size when the analysis started
-        self._deepfake_ran = False   # the first analysis also downloads / loads the models
+        self._analysis_size = None
+        self._deepfake_ran = False
 
-        # Last values chosen in the filter windows (re-used next time)
-        self.blur_radius = 2         # kernel size = 2 * radius + 1
+        self.blur_radius = 2
         self.threshold_value = 128
 
         # Initialisation UI
@@ -102,9 +101,7 @@ class MainWindow(QMainWindow):
         self._create_bottom_toolbar()
         self._update_undo_redo_state()
 
-    # ------------------------------------------------------------------
     # Current image = active layer
-    # ------------------------------------------------------------------
     @property
     def current_image(self) -> np.ndarray | None:
         """Pixels of the active layer (what the tools and filters work on)."""
@@ -117,21 +114,16 @@ class MainWindow(QMainWindow):
         self._displayed_size = None
         self.deselect()
         self._refresh_layers_panel()
-        if hasattr(self, "results_panel"):     # results of the previous image are not valid any more
+        if hasattr(self, "results_panel"):
             self._last_boxes = []
             self.results_panel.clear()
             self.canvas.clear_highlight()
 
     def _composite(self) -> np.ndarray | None:
-        """The image as the user sees it: all visible layers merged."""
         return None if self.layers is None else self.layers.composite()
 
     def _make_action(self, text: str, slot, icon_name: str | None = None,
                      tooltip: str | None = None, shortcut=None) -> QAction:
-        """
-        Crée une QAction. Si l'icône assets/<icon_name>.svg existe, elle est utilisée,
-        sinon le bouton affichera simplement le texte.
-        """
         icon = load_icon(icon_name) if icon_name else None
         action = QAction(icon, text, self) if icon else QAction(text, self)
         if shortcut is not None:
@@ -142,33 +134,42 @@ class MainWindow(QMainWindow):
         if tooltip:
             action.setToolTip(tooltip)
         if slot is not None:
+            # An imported image still being placed is put on its layer before any other command
+            action.triggered.connect(lambda _checked=False, a=action: self._before_command(a))
             action.triggered.connect(slot)
         return action
 
     def _create_actions(self):
-        # --- File ---
+        #File
         self.new_act = self._make_action("&New...", self.new_image, "new", "New image (Ctrl+N)",
                                          QKeySequence.StandardKey.New)
         self.open_act = self._make_action("&Open...", self.open_image, "open", "Open an image (Ctrl+O)",
                                           QKeySequence.StandardKey.Open)
+        self.import_act = self._make_action("&Import image...", self.import_image, "file-import",
+                                            "Add an image onto the current layer: move, resize and "
+                                            "rotate it, then press Enter (Ctrl+Shift+I)", "Ctrl+Shift+I")
+        self.place_apply_act = self._make_action("Apply", lambda: self._finish_placement(True), None,
+                                                 "Put the imported image on the layer (Enter)",
+                                                 [QKeySequence(Qt.Key.Key_Return), QKeySequence(Qt.Key.Key_Enter)])
+        self.place_cancel_act = self._make_action("Cancel", lambda: self._finish_placement(False), None,
+                                                  "Cancel the import (Esc)")
+        self.place_apply_act.setEnabled(False)   # only while an imported image is being placed
+        self.addAction(self.place_apply_act)     # so Enter works without a menu entry
         self.save_act = self._make_action("&Save", self.save_image, "disk", "Save (Ctrl+S)",
                                           QKeySequence.StandardKey.Save)
         self.save_as_act = self._make_action("Save &As...", self.save_image_as, "floppy-disk-pen",
                                              "Save As (Ctrl+Shift+S)", QKeySequence.StandardKey.SaveAs)
-        self.properties_act = self._make_action("&Properties...", self.show_properties)
+        self.properties_act = self._make_action("&Properties...", self.show_properties, "info",
+                                                "Image properties (size, format...)")
         self.quit_act = self._make_action("&Quit", self.close, "quit", "Quit",
                                           QKeySequence.StandardKey.Quit)
 
-        # --- History (Undo / Redo) ---
+        # History (Undo / Redo)
         self.undo_act = self._make_action("&Undo", self.undo, "undo", "Undo (Ctrl+Z)",
                                           QKeySequence.StandardKey.Undo)
         # Ctrl+Y (Windows) et Ctrl+Shift+Z (macOS / Linux / Photoshop)
         self.redo_act = self._make_action("&Redo", self.redo, "redo", "Redo (Ctrl+Y)",
                                           [QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
-
-        # --- Tools (un seul actif à la fois) ---
-        # Pour activer un outil quand il sera prêt : enlever setEnabled(False)
-        # et brancher canvas.tool_pressed / tool_dragged / tool_released.
         self.tool_group = QActionGroup(self)
 
         # One tool at a time, pressing the active tool again deactivates it
@@ -196,6 +197,10 @@ class MainWindow(QMainWindow):
         self.arrow_tool_act = self._add_tool("Arrow", TOOL_ARROW, "arrow", "Arrow: drag to draw")
         self.fill_tool_act = self._add_tool("Fill", TOOL_FILL, "bucket",
                                             "Fill: click inside a shape to fill it with the fill color")
+        self.zoom_tool_act = self._add_tool("Zoom", TOOL_ZOOM, "zoom",
+                                            "Zoom: click to zoom in, right click to zoom out")
+        self.text_tool_act = self._add_tool("Text", TOOL_TEXT, "text",
+                                            "Text: click where you want to add text, then start typing")
 
         self.hand_tool_act.setChecked(True)
 
@@ -204,12 +209,12 @@ class MainWindow(QMainWindow):
         # Crop Tool
         self._crop_start = None
         self._stroke_points = []
-        self._stroke_mask = None    # coverage of the stroke being drawn (see _begin_stroke)
+        self._stroke_mask = None
         self._shape_start = None
-        self._shape_view = None     # screen image when a shape started (for its preview)
-        self.brush_color = (0, 0, 0)  # black in the beginning, like Paint
+        self._shape_view = None
+        self.brush_color = (0, 0, 0)
         self.brush_size = 5
-        self.brush_opacity = 1.0    # 0..1, set with the tool options bar
+        self.brush_opacity = 1.0
         self.color_act = self._make_action("Color", self.choose_brush_color, None,
                                            "Color for the brush, lines and shape outlines")
         self.size_act = self._make_action(f"Size: {self.brush_size}", self.choose_brush_size, None,
@@ -237,7 +242,7 @@ class MainWindow(QMainWindow):
                                                 "Delete the selected area (Del)", QKeySequence.StandardKey.Delete)
         self.select_all_act = self._make_action("Select &All", self.select_all, None,
                                                 "Select the entire image (Ctrl+A)", QKeySequence.StandardKey.SelectAll)
-        self.deselect_act = self._make_action("D&eselect", self.deselect, None, "Deselect (Esc)", "Esc")
+        self.deselect_act = self._make_action("D&eselect", self._escape, None, "Deselect (Esc)", "Esc")
         self._update_color_icon()
         self._update_size_icon()
         self._update_fill_icon()
@@ -245,8 +250,9 @@ class MainWindow(QMainWindow):
         self.canvas.tool_pressed.connect(self._on_tool_pressed)
         self.canvas.tool_dragged.connect(self._on_tool_dragged)
         self.canvas.tool_released.connect(self._on_tool_released)
+        self.canvas.placement_done.connect(self._on_placement_done)
 
-        # --- Image ---
+        #Image
         self.rot_ccw_act = self._make_action("Rotate Left", lambda: self._apply_edit(rotate_left),
                                              "rotate_left", "Rotate 90° Counter-Clockwise (Ctrl+Shift+R)",
                                              "Ctrl+Shift+R")
@@ -261,8 +267,10 @@ class MainWindow(QMainWindow):
         self.flip_d_act = self._make_action("Transpose", lambda: self._apply_edit(flip_diagonal),
                                             "reflect-diagonal", "Flip Diagonal (swap rows and columns)")
         self.resize_act = self._make_action("&Resize...", self.resize_image, "resize", "Resize the image")
+        self.adjust_act = self._make_action("Adjust", self.adjust_brightness_contrast, "adjust",
+                                            "Brightness / Contrast")
 
-        # --- Filters ---
+        #Filters
         self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur (choose the strength)")
         self.sobel_act = self._make_action("Sobel", self.apply_sobel_filter, "sobel",
                                            "Sobel Filter (Edge Detection)")
@@ -271,14 +279,19 @@ class MainWindow(QMainWindow):
         self.otsu_act = self._make_action("Otsu", self.apply_histogram_threshold, "otsu",
                                           "Automatic Threshold (Otsu)")
 
-        # --- Detection ---
+        #Detection
         self.face_detect_act = self._make_action("Faces", self.run_face_detection, "face",
                                                  "Detect Faces")
+        self.cut_faces_act = self._make_action("Cut faces", self.cut_faces, "smart_cut",
+                                               "Cut out every face as a sticker you can drag")
         self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, "deepfake",
                                               "Run Deepfake Analysis")
 
     def _on_tool_clicked(self, action):
-        """Switch to the clicked tool, or back to the Hand if the active tool was clicked again."""
+        if self._text_editor is not None:
+            self._finish_text(True)
+        if self._placement is not None:
+            self._finish_placement(True)
         if action.isChecked():
             tool = action.data()
         else:
@@ -287,7 +300,6 @@ class MainWindow(QMainWindow):
         if tool not in (TOOL_SELECT, TOOL_HAND, TOOL_LASSO):
             self.deselect()
         self.canvas.set_tool(tool)
-        # Show the size / opacity bar only for the tools that use them
         self.tool_options.show_for_tool(tool in SIZE_TOOLS, tool in OPACITY_TOOLS)
 
     def _add_tool(self, text: str, tool_name: str, icon_name: str, tooltip: str) -> QAction:
@@ -305,6 +317,7 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.new_act)
         file_menu.addAction(self.open_act)
+        file_menu.addAction(self.import_act)
         file_menu.addSeparator()
         file_menu.addAction(self.save_act)
         file_menu.addAction(self.save_as_act)
@@ -324,20 +337,13 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.select_all_act)
         edit_menu.addAction(self.deselect_act)
-
-        # Undo / Redo also as icons right after the menus, like Paint (saves room in the ribbon)
         menubar.addAction(self.undo_act)
         menubar.addAction(self.redo_act)
 
-    # ------------------------------------------------------------------
+
     # Filters
-    # ------------------------------------------------------------------
     def _ask_filter_value(self, make_image, title, label, minimum, maximum, value,
                           suffix="", hint=""):
-        """
-        Open a FilterDialog with a live preview of make_image(value) on the active layer.
-        Returns the chosen value, or None if the user cancelled.
-        """
         def show_preview(v):
             try:
                 rgb = make_image(v)
@@ -350,7 +356,7 @@ class MainWindow(QMainWindow):
         dialog.preview_requested.connect(show_preview)
         dialog.preview_cleared.connect(self._update_display)
         accepted = dialog.exec() == FilterDialog.DialogCode.Accepted
-        self._update_display()   # remove the preview (the real result is applied just after)
+        self._update_display()
         return dialog.value() if accepted else None
 
     def apply_gaussian_blur(self):
@@ -416,9 +422,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.status_bar.showMessage(f"Error with Otsu threshold: {e}", 3000)
 
-    # ------------------------------------------------------------------
+
     # Detection (runs in the background)
-    # ------------------------------------------------------------------
     def _start_analysis(self, func, on_done, message) -> bool:
         """Start func(merged image) in the background. Returns False if it could not start."""
         if self.current_image is None:
@@ -427,7 +432,7 @@ class MainWindow(QMainWindow):
         if self.analysis_task.is_running():
             self.status_bar.showMessage("An analysis is already running, please wait...", 3000)
             return False
-        image = self._composite().copy()       # what the user sees (all visible layers merged)
+        image = self._composite().copy()
         self._analysis_size = self.layers.size
         self._set_analysis_running(True, message)
         self.analysis_task.start(func, (image,), on_done, self._on_analysis_failed)
@@ -489,16 +494,11 @@ class MainWindow(QMainWindow):
         if self._deepfake_ran:
             message = "Running deepfake analysis..."
         else:
-            # First time: CLIP (~1.7 GB) is downloaded from the internet, then both models are loaded
             message = ("Running deepfake analysis... First time: downloading and loading the models "
                        "(CLIP, about 1.7 GB), this can take several minutes.")
         self._start_analysis(analyze_deepfake, self._on_deepfake_done, message)
 
     def _on_deepfake_done(self, results):
-        """
-        results = {"generated_probability": float,   # whole image is AI-generated (UnivFD)
-                   "faces": [ {bbox, manipulation_probability, heatmap, crop_box}, ... ]}  # Xception
-        """
         self._deepfake_ran = True
         self._set_analysis_running(False)
         if not self._analysis_still_valid():
@@ -512,7 +512,6 @@ class MainWindow(QMainWindow):
 
         image_verdict = "likely AI-generated" if generated >= GENERATED_THRESHOLD else "likely not AI-generated"
         if not faces:
-            # No face: the whole-image score is still shown, but there is nothing to draw
             self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
                                         f"no faces found.", 8000)
             return
@@ -556,10 +555,87 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Analysis complete: {image_verdict} ({generated * 100:.0f}%), "
                                     f"{len(faces)} face(s), {fakes} likely manipulated.", 8000)
 
+    # Unsaved changes
+    def _set_modified(self, modified: bool) -> None:
+        self._modified = modified
+        self._update_title()
+
+    def _update_title(self) -> None:
+        app = "Machine Vision Photo Editor & Deepfake Detector"
+        if self.layers is None:
+            self.setWindowTitle(app)
+            return
+        name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+        self.setWindowTitle(f"{name}{'*' if self._modified else ''} - {app}")
+
+    def _confirm_discard(self) -> bool:
+        if self.layers is None or not self._modified:
+            return True
+        name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved changes")
+        box.setText(f"Do you want to save the changes made to \"{name}\"?")
+        box.setInformativeText("If you don't save, your changes will be lost.")
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == save:
+            return self.save_image()
+        return clicked == discard
+
     def closeEvent(self, event):
-        # Let a running analysis finish before the window (and its thread) is destroyed
+        self._finish_text(True)
+        self._finish_placement(True)
+        if not self._confirm_discard():
+            event.ignore()
+            return
         self.analysis_task.wait()
         super().closeEvent(event)
+
+    def cut_faces(self):
+        if self.layers is None:
+            QMessageBox.warning(self, "Warning", "Please open an image first.")
+            return
+        self.status_bar.showMessage("Cutting out faces...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            image = self._composite()
+            masks = []
+            for (x1, y1, x2, y2) in detect_faces(image):
+                w, h = x2 - x1, y2 - y1
+                box = (x1 - 0.3 * w, y1 - 0.5 * h, x2 + 0.3 * w, y2 + 0.2 * h)
+                try:
+                    masks.append(smart_cut_mask(image, box)[0])
+                except ValueError:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to cut out faces: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not masks:
+            QMessageBox.information(self, "Cut faces", "No faces found in the image.")
+            return
+
+        self._push_history()
+        self.deselect()
+        photo = self.layers.layers[0]
+        height, width = self.layers.size
+        for number, mask in enumerate(masks, start=1):
+            face = paste_img(np.zeros((height, width, 3), np.uint8), image, 0, 0, mask)
+            self.layers.add_layer_on_top(f"Face {number}", face, mask)
+            photo.rgb = fill_mask(photo.rgb, mask, (255, 255, 255))
+            photo.alpha = fill_mask(self._alpha3(photo.alpha), mask, (0, 0, 0))[:, :, 0]
+        self._after_edit()
+
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+        self.status_bar.showMessage(f"Cut out {len(masks)} face(s): drag them with the Hand", 5000)
 
     def _add_overlay_layer(self, name, draw):
         """Put what draw(image) draws on a new transparent layer at the top."""
@@ -574,21 +650,27 @@ class MainWindow(QMainWindow):
         self.ribbon = Ribbon(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.ribbon)
 
+        # Show the detection feature first, as it is the main feature of the app and should always visible.
+        detection = self.ribbon.add_group("Detection")
+        detection.add_large_button(self.deepfake_act, highlight=True)
+        detection.add_large_button(self.face_detect_act, highlight=True)
+        detection.add_labeled_buttons([self.cut_faces_act, self.results_act], rows=2)
+
         clipboard = self.ribbon.add_group("Clipboard")
-        clipboard.add_large_button(self.paste_act)
-        clipboard.add_small_buttons([self.cut_act, self.copy_act])
+        clipboard.add_small_buttons([self.paste_act, self.cut_act, self.copy_act], rows=3)
 
         image = self.ribbon.add_group("Image")
         image.add_small_buttons([self.rot_ccw_act, self.rot_cw_act,
                                  self.flip_h_act, self.flip_v_act,
                                  self.rot_180_act, self.flip_d_act])
-        image.add_large_button(self.resize_act)
+        image.add_labeled_buttons([self.resize_act, self.adjust_act], rows=2)
 
         tools = self.ribbon.add_group("Tools")
         tools.add_small_buttons([self.hand_tool_act, self.select_tool_act,
                                  self.lasso_tool_act, self.crop_tool_act, self.brush_tool_act,
                                  self.eraser_tool_act, self.picker_tool_act,
-                                 self.fill_tool_act])
+                                 self.fill_tool_act, self.text_tool_act,
+                                 self.zoom_tool_act])
 
         shapes = self.ribbon.add_group("Shapes")
         shapes.add_small_buttons([self.rect_tool_act, self.ellipse_tool_act,
@@ -596,42 +678,32 @@ class MainWindow(QMainWindow):
                                   self.right_triangle_tool_act, self.diamond_tool_act,
                                   self.star_tool_act, self.arrow_tool_act])
 
-        # One colour block for the brush, the shapes and the fill tool
+        # One color block for the brush, the shapes and the fill tool
         colors = self.ribbon.add_group("Colors")
         self.color_palette = ColorPalette(self.brush_color, self.fill_color)
         self.color_palette.color_chosen.connect(self._on_palette_color)
         colors.add_widget(self.color_palette)
 
-        layers = self.ribbon.add_group("Layers")
-        layers.add_large_button(self.layers_act)
-
         filters = self.ribbon.add_group("Filters")
         filters.add_small_buttons([self.blur_act, self.sobel_act,
                                    self.threshold_act, self.otsu_act])
 
-        detection = self.ribbon.add_group("Detection")
-        detection.add_large_button(self.face_detect_act)
-        detection.add_large_button(self.deepfake_act)
-        detection.add_large_button(self.results_act)
+        layers = self.ribbon.add_group("Layers")
+        layers.add_large_button(self.layers_act)
 
     def _on_palette_color(self, slot, rgb):
         """A colour was picked in the Colors block (palette or colour wheel)."""
         if slot == SLOT_COLOR:
             self.brush_color = tuple(rgb)
             self._update_color_icon()
+            if self._text_editor is not None:
+                self._text_editor.set_color(self.brush_color)
         else:
             self.fill_color = tuple(rgb)
             self._update_fill_icon()
 
-    # ------------------------------------------------------------------
     # Undo / Redo
-    # ------------------------------------------------------------------
     def _set_image(self, new_image: np.ndarray) -> None:
-        """
-        Remplace les pixels du calque actif (sa transparence est gardée), en sauvegardant
-        l'état précédent dans l'historique. Utilisé par les filtres.
-        Pour dessiner sur un calque, utiliser plutôt _apply_edit (voir plus bas).
-        """
         if self.layers is None:
             self.current_image = new_image
             self._after_edit()
@@ -643,6 +715,7 @@ class MainWindow(QMainWindow):
     def _push_history(self) -> None:
         """Save the current state of all layers (cheap: the arrays are shared, not copied)."""
         self.history.push(self.layers.snapshot())
+        self._set_modified(True)
 
     def _after_edit(self) -> None:
         self._update_display()
@@ -652,11 +725,18 @@ class MainWindow(QMainWindow):
     def undo(self) -> None:
         if self.layers is None:
             return
+        if self._text_editor is not None:
+            self._finish_text(False)
+            return
+        if self._placement is not None:
+            self._finish_placement(False)
+            return
         self.deselect()
         previous = self.history.undo(self.layers.snapshot())
         if previous is None:
             return
         self.layers = previous
+        self._set_modified(True)
         self._after_edit()
         self.status_bar.showMessage("Undo", 2000)
 
@@ -668,6 +748,7 @@ class MainWindow(QMainWindow):
         if following is None:
             return
         self.layers = following
+        self._set_modified(True)
         self._after_edit()
         self.status_bar.showMessage("Redo", 2000)
 
@@ -676,14 +757,8 @@ class MainWindow(QMainWindow):
         self.undo_act.setEnabled(self.history.can_undo())
         self.redo_act.setEnabled(self.history.can_redo())
 
-    # ------------------------------------------------------------------
     # Layers panel
-    # ------------------------------------------------------------------
     def _create_layers_panel(self):
-        """
-        Side bar on the right of the image (fixed width, not movable),
-        shown / hidden with the "Layers" button of the ribbon (or F7).
-        """
         self.layers_panel = LayersPanel(self)
         self.layers_panel.hide()
 
@@ -698,29 +773,36 @@ class MainWindow(QMainWindow):
         self.results_panel = ResultsPanel(self)
         self.results_panel.hide()
         self.results_panel.face_selected.connect(self._show_face)
-        self._last_boxes = []      # boxes of the faces listed in the results panel
+        self._last_boxes = []
 
-        # Right column = layers panel on top, results panel under it
-        self.side_column = QWidget(self)
+        self.side_column = QSplitter(Qt.Orientation.Vertical, self)
         self.side_column.setFixedWidth(220)
-        side = QVBoxLayout(self.side_column)
-        side.setContentsMargins(0, 0, 0, 0)
-        side.setSpacing(0)
-        side.addWidget(self.layers_panel, 1)
-        side.addWidget(self.results_panel, 1)
+        self.side_column.addWidget(self.layers_panel)
+        self.side_column.addWidget(self.results_panel)
+        self.side_column.setStretchFactor(0, 1)
+        self.side_column.setStretchFactor(1, 1)
+        self.side_column.setChildrenCollapsible(False)
+        self.layers_panel.setMinimumHeight(120)
+        self.results_panel.setMinimumHeight(120)
+        self.side_column.setHandleWidth(7)
+
+        # Visible grip in the middle of the bar (light on dark theme, dark on light theme)
+        dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        grip = "rgba(255, 255, 255, 70)" if dark else "rgba(0, 0, 0, 60)"
+        self.side_column.setStyleSheet(
+            f"QSplitter::handle {{ background-color: {grip}; margin: 2px 70px; border-radius: 1px; }}")
         self.side_column.hide()
 
-        # Central area = [ tool options | canvas | right column ]
+        # Central area
         central = QWidget(self)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.tool_options)
-        layout.addWidget(self.canvas, 1)       # the canvas takes all the remaining space
+        layout.addWidget(self.canvas, 1)
         layout.addWidget(self.side_column)
         self.setCentralWidget(central)
 
-        # Checkable buttons that show / hide the panels
         self.layers_act = self._make_action("Layers", None, "layers",
                                             "Show / hide the layers panel (F7)", "F7")
         self.layers_act.setCheckable(True)
@@ -792,10 +874,12 @@ class MainWindow(QMainWindow):
         layer = self.layers.layers[index]
         if layer.visible != visible:
             layer.visible = visible
+            self._set_modified(True)
             self._update_display()
 
     def _on_layer_opacity_changed(self, index: int, percent: int) -> None:
         self.layers.layers[index].opacity = percent / 100
+        self._set_modified(True)
         self._update_display()
 
     def _on_layer_renamed(self, index: int, name: str) -> None:
@@ -809,8 +893,6 @@ class MainWindow(QMainWindow):
         self.bottom_toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, self.bottom_toolbar)
 
-        # Séparateur élastique pour repousser le zoom à droite
-        # (les rotations sont maintenant dans le ruban, groupe "Image")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.bottom_toolbar.addWidget(spacer)
@@ -833,24 +915,24 @@ class MainWindow(QMainWindow):
             pixmap = QPixmap.fromImage(numpy_to_qimage(image))
             h, w, _ = image.shape
             if (h, w) == self._displayed_size:
-                # Same size: just replace the picture and keep the user's zoom
                 self.canvas.show_preview(pixmap)
             else:
-                # New size (open, new, rotate, crop, resize...): fit to the window
                 self.canvas.set_pixmap(pixmap)
                 self._displayed_size = (h, w)
             self.zoom_control.setEnabled(True)
             self.status_bar.showMessage(f"Image: {w}x{h} px | Layers: {len(self.layers)}")
 
     def new_image(self) -> None:
-        # Window with the size (custom or preset formats) and the background colour
+        if not self._confirm_discard():
+            return
         dialog = NewImageDialog(self)
         if dialog.exec() != NewImageDialog.DialogCode.Accepted:
             return
         width, height, color = dialog.values()
 
         self.current_image = new_img(width, height, color)
-        self.current_file_path = None  # not saved yet -> Save will ask for a file name
+        self.current_file_path = None
+        self._set_modified(False)
         self.history.clear()
         self._update_undo_redo_state()
         self._update_display()
@@ -867,6 +949,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Image Properties", text)
 
     def open_image(self) -> None:
+        if not self._confirm_discard():
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
         )
@@ -876,6 +960,7 @@ class MainWindow(QMainWindow):
         try:
             self.current_image = read_img(file_path)
             self.current_file_path = file_path
+            self._set_modified(False)
             # Nouvelle image : on repart d'un historique vide
             self.history.clear()
             self._update_undo_redo_state()
@@ -887,26 +972,118 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
 
-    def save_image(self):
+    def import_image(self) -> None:
+
+        if self.layers is None:
+            self.open_image()
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
+        )
+        if not file_path:
+            return
+        try:
+            piece = read_img(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import image: {e}")
+            return
+
+        self.deselect()
+        self.hand_tool_act.setChecked(True)
+        self._on_tool_clicked(self.hand_tool_act)
+
+        height, width = self.layers.size
+        piece_h, piece_w = piece.shape[:2]
+        scale = min(1.0, width / piece_w, height / piece_h)
+        alpha = np.full((piece_h, piece_w), 255, np.uint8)
+        self._placement = Placement(piece, alpha, (width / 2, height / 2), (piece_w * scale, piece_h * scale))
+
+        rgba = np.ascontiguousarray(np.dstack([piece, alpha]))
+        image = QImage(rgba.data, piece_w, piece_h, 4 * piece_w, QImage.Format.Format_RGBA8888).copy()
+        layer = self.layers.active_layer
+        self.canvas.start_placement(self._placement, QPixmap.fromImage(image), layer.opacity)
+        self.place_apply_act.setEnabled(True)
+        self._show_placement_buttons(True)
+
+        hidden = "  (this layer is hidden!)" if not layer.visible else ""
+        self.status_bar.showMessage(
+            f"Placing {os.path.basename(file_path)} on layer \"{layer.name}\"{hidden}: drag to move, "
+            "corners to resize (Shift: free), round handle to rotate (Shift: 15° steps). "
+            "Enter = apply, Esc = cancel.")
+
+    def _show_placement_buttons(self, visible: bool) -> None:
+        """Apply / Cancel buttons in the status bar while an imported image is placed."""
+        if not self._placement_buttons:
+            for action in (self.place_apply_act, self.place_cancel_act):
+                button = QToolButton()
+                button.setDefaultAction(action)
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+                self.status_bar.addPermanentWidget(button)
+                self._placement_buttons.append(button)
+        for button in self._placement_buttons:
+            button.setVisible(visible)
+
+    def _on_placement_done(self) -> None:
+        self._finish_placement(True)
+
+    def _finish_placement(self, apply: bool) -> None:
+        """Put the imported image on the active layer (apply=True) or drop it."""
+        placement, self._placement = self._placement, None
+        if placement is None:
+            return
+        self.canvas.end_placement()
+        self.place_apply_act.setEnabled(False)
+        self._show_placement_buttons(False)
+        if not apply or self.layers is None:
+            self.status_bar.showMessage("Import cancelled", 3000)
+            return
+        layer = self.layers.active_layer
+        rgb, alpha = placement.apply_to(layer.rgb, layer.alpha)
+        self._push_history()
+        layer.rgb, layer.alpha = rgb, alpha
+        self._after_edit()
+        self.status_bar.showMessage(f"Image added to layer \"{layer.name}\" (Ctrl+Z to undo)", 4000)
+
+    def _before_command(self, action) -> None:
+        if self._text_editor is not None and action not in (self.undo_act, self.deselect_act,
+                                                            self.color_act, self.size_act):
+            self._finish_text(True)        # a text being typed is applied before any other command
+        if self._placement is None:
+            return
+        keep_placing = (self.undo_act, self.deselect_act, self.place_apply_act, self.place_cancel_act,
+                        self.color_act, self.size_act, self.fill_color_act)
+        if action not in keep_placing:
+            self._finish_placement(True)
+
+    def _escape(self) -> None:
+        """Esc: apply the text being typed, cancel the image being imported, or remove the selection."""
+        if self._text_editor is not None:
+            self._finish_text(True)
+        elif self._placement is not None:
+            self._finish_placement(False)
+        else:
+            self.deselect()
+
+    def save_image(self) -> bool:
+        """Save (asks for a file name the first time). Returns True if the image was saved."""
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "No image to save.")
-            return
+            return False
 
         if self.current_file_path:
-            self._write_image_to_file(self.current_file_path)
-        else:
-            self.save_image_as()
+            return self._write_image_to_file(self.current_file_path)
+        return self.save_image_as()
 
-    def save_image_as(self):
+    def save_image_as(self) -> bool:
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "No image to save.")
-            return
+            return False
 
         file_path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Image As", "", "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;Bitmap (*.bmp)"
         )
         if not file_path:
-            return
+            return False
 
         # Si l'utilisateur n'a pas tapé d'extension, on prend celle du filtre choisi
         if not os.path.splitext(file_path)[1]:
@@ -920,13 +1097,16 @@ class MainWindow(QMainWindow):
         # On ne retient le nouveau chemin que si l'enregistrement a réussi
         if self._write_image_to_file(file_path):
             self.current_file_path = file_path
+            self._update_title()
+            return True
+        return False
 
     def _write_image_to_file(self, path: str) -> bool:
-        """Enregistre l'image courante. Renvoie True si ça a marché."""
         try:
             # save_img(image, path) : l'image NumPy d'abord, le chemin ensuite
             # All visible layers are merged into one image when saving
             save_img(self._composite(), path)
+            self._set_modified(False)
             self.status_bar.showMessage(f"Saved: {os.path.basename(path)}")
             return True
         except Exception as e:
@@ -934,12 +1114,6 @@ class MainWindow(QMainWindow):
             return False
 
     def _apply_edit(self, operation, *args, erase=False):
-        """
-        Apply operation(image, *args) and save the previous state for undo.
-        - Geometric operations (rotate, flip, resize, crop) are applied to all layers.
-        - Anything else (brush, shapes, fill...) draws on the active layer only;
-          with erase=True the painted pixels become transparent instead (eraser).
-        """
         if self.current_image is None:
             QMessageBox.warning(self, "Warning", "Open an image first.")
             return
@@ -1023,6 +1197,9 @@ class MainWindow(QMainWindow):
         if tool in (TOOL_BRUSH, TOOL_ERASER) and self._stroke_mask is not None:
             self._end_stroke()
             return
+        if tool == TOOL_TEXT:
+            self._add_text(pos)
+            return
         if tool == TOOL_SELECT:
             self._end_select(pos)
             return
@@ -1045,11 +1222,6 @@ class MainWindow(QMainWindow):
         return draw_shape(image, tool, start, end, self.brush_color, self.brush_size)
 
     def _shape_end(self, tool, start, end):
-        """
-        End point of a shape. While Shift is held, the shape is kept "perfect":
-        square / circle / regular star..., equilateral triangle, and lines snapped
-        to horizontal, vertical or 45°.
-        """
         if not QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
             return end
         dx, dy = end[0] - start[0], end[1] - start[1]
@@ -1057,16 +1229,15 @@ class MainWindow(QMainWindow):
         sign_y = 1 if dy >= 0 else -1
 
         if tool == TOOL_LINE:
-            if abs(dy) < 0.414 * abs(dx):        # less than 22.5°: horizontal
+            if abs(dy) < 0.414 * abs(dx):
                 return (end[0], start[1])
-            if abs(dx) < 0.414 * abs(dy):        # more than 67.5°: vertical
+            if abs(dx) < 0.414 * abs(dy):
                 return (start[0], end[1])
-            d = max(abs(dx), abs(dy))            # otherwise: 45° diagonal
+            d = max(abs(dx), abs(dy))
             return (start[0] + sign_x * d, start[1] + sign_y * d)
 
         d = max(abs(dx), abs(dy))
         if tool == TOOL_TRIANGLE:
-            # Equilateral triangle: height = width * sqrt(3) / 2
             return (start[0] + sign_x * d, start[1] + sign_y * d * 0.866)
         return (start[0] + sign_x * d, start[1] + sign_y * d)
 
@@ -1086,17 +1257,72 @@ class MainWindow(QMainWindow):
             self.fill_color = (color.red(), color.green(), color.blue())
             self._update_fill_icon()
 
+# Text tool
+
+    def _add_text(self, pos):
+        """Text tool: a click starts a text on the image; a click outside it applies it."""
+        if self.layers is None:
+            return
+        if self._text_editor is not None:
+            self._finish_text(True)
+            return
+        self.deselect()
+        self._text_editor = TextEditor(self.canvas, pos, self.brush_color, self)
+        self._text_editor.finished.connect(self._finish_text)
+        self.status_bar.showMessage("Type your text. Esc or a click outside applies it.")
+
+    def _finish_text(self, apply: bool) -> None:
+        """Put the typed text on a new layer (apply=True) or drop it."""
+        editor, self._text_editor = self._text_editor, None
+        if editor is None:
+            return
+        height, width = self.layers.size
+        result = editor.render(width, height) if apply else None
+        text = editor.text()
+        editor.close()
+        self.status_bar.clearMessage()
+        if result is None:
+            if apply and text.strip():
+                self.status_bar.showMessage("The text is outside the image", 3000)
+            return
+        rgb, alpha = result
+        self._push_history()
+        self.layers.add_layer_on_top(f"Text: {text.strip().splitlines()[0][:20]}", rgb, alpha)
+        self._after_edit()
+        self.status_bar.showMessage("Text added on a new layer. Use the Hand to move it.", 4000)
+
+    def adjust_brightness_contrast(self):
+        if self.layers is None:
+            QMessageBox.warning(self, "Warning", "Open an image first.")
+            return
+        original = self.current_image
+        alpha = self.layers.active_layer.alpha
+
+        def show_preview(brightness, contrast):
+            adjusted = brightness_contrast(original, brightness, contrast)
+            self._show_image(self.layers.composite((adjusted, alpha)))
+
+        dialog = AdjustDialog(self)
+        dialog.preview_requested.connect(show_preview)
+        accepted = dialog.exec() == AdjustDialog.DialogCode.Accepted
+        self._update_display()  # remove the preview
+        brightness, contrast = dialog.values()
+        if not accepted or (brightness == 0 and contrast == 0):
+            return
+        self._set_image(brightness_contrast(original, brightness, contrast))  # undo with Ctrl+Z
+        self.status_bar.showMessage(f"Brightness {brightness:+d}, contrast {contrast:+d}", 3000)
+
     def _fill_at(self, pos):
             x, y = int(pos.x()), int(pos.y())
             height, width = self.current_image.shape[:2]
-            if 0 <= x < width and 0 <= y < height:  # ignore clicks outside the image
+            if 0 <= x < width and 0 <= y < height:
                 self._apply_edit(flood_fill, x, y, self.fill_color, 60)
 
     def _pick_color(self, pos):
         try:
-            color = get_pixel_color(self._composite(), pos.x(), pos.y())  # colour as seen on screen
+            color = get_pixel_color(self._composite(), pos.x(), pos.y())
         except ValueError:
-            return  # clicked outside the image: do nothing
+            return
         self.brush_color = color
         self._update_color_icon()
         self.status_bar.showMessage(f"Picked color RGB{color}", 3000)
@@ -1111,7 +1337,7 @@ class MainWindow(QMainWindow):
         swatch = QPixmap(32, 32)
         swatch.fill(QColor(*self.brush_color))
         self.color_act.setIcon(QIcon(swatch))
-        if hasattr(self, "color_palette"):   # keep the Colors block in sync (e.g. after the picker)
+        if hasattr(self, "color_palette"):
             self.color_palette.set_color(SLOT_COLOR, self.brush_color)
 
     def _update_size_icon(self):
@@ -1128,9 +1354,11 @@ class MainWindow(QMainWindow):
 
     def choose_brush_color(self):
         color = QColorDialog.getColor(QColor(*self.brush_color), self, "Color")
-        if color.isValid():  # False if the user pressed Cancel
+        if color.isValid():
             self.brush_color = (color.red(), color.green(), color.blue())
             self._update_color_icon()
+            if self._text_editor is not None:
+                self._text_editor.set_color(self.brush_color)
 
     def choose_brush_size(self):
         size, ok = QInputDialog.getInt(self, "Size", "Size (px):", self.brush_size, 1, 200)
@@ -1138,7 +1366,6 @@ class MainWindow(QMainWindow):
             self.set_brush_size(size)
 
     def set_brush_size(self, size: int) -> None:
-        """Single place that changes the size (dialog, slider or typed value)."""
         self.brush_size = size
         self.size_act.setText(f"Size: {size}")
         self._update_size_icon()
@@ -1149,25 +1376,14 @@ class MainWindow(QMainWindow):
         self.brush_opacity = percent / 100
         self.tool_options.set_opacity(percent)
 
-    # ------------------------------------------------------------------
-    # Brush / eraser strokes
-    # ------------------------------------------------------------------
-    # While the mouse moves, only the new piece of the stroke (from the previous mouse
-    # position to the new one) is drawn, and only its small rectangle of the screen is
-    # recomputed. This keeps drawing smooth whatever the image size, the length of the
-    # stroke or the number of layers.
-    #
-    # The stroke is first drawn as a coverage mask (0 = untouched, 255 = fully covered,
-    # with soft anti-aliased edges), then mixed with the active layer using the colour
-    # and the opacity of the brush (or removed from the layer for the eraser).
-
+# Eraser and brush stroke
     def _begin_stroke(self, tool, pos):
         if self.layers is None:
             return
         self._stroke_tool = tool
         self._stroke_mask = np.zeros(self.layers.size, dtype=np.uint8)
-        self._stroke_view = self._composite().copy()   # what the screen shows during the stroke
-        self._stroke_box = None                        # rectangle covered by the stroke so far
+        self._stroke_view = self._composite().copy()
+        self._stroke_box = None
         point = (pos.x(), pos.y())
         self._stroke_points = [point]
         self._add_stroke_segment(point, point)
@@ -1188,7 +1404,6 @@ class MainWindow(QMainWindow):
             new_rgb[region], new_alpha[region] = rgb, alpha
             self._push_history()
             layer.rgb, layer.alpha = new_rgb, new_alpha
-            # The preview shown during the stroke is exactly the final image: reuse it
             self.layers.remember_composite(self._stroke_view)
             self._after_edit()
         self._stroke_mask = None
@@ -1203,10 +1418,9 @@ class MainWindow(QMainWindow):
         y0 = max(0, int(min(p0[1], p1[1])) - margin)
         y1 = min(height, int(max(p0[1], p1[1])) + margin + 1)
         if x0 >= x1 or y0 >= y1:
-            return  # completely outside the image
+            return
         region = (slice(y0, y1), slice(x0, x1))
 
-        # Draw the new piece on the coverage mask with the project's brush function
         points = [(p0[0] - x0, p0[1] - y0)]
         if p1 != p0:
             points.append((p1[0] - x0, p1[1] - y0))
@@ -1226,17 +1440,14 @@ class MainWindow(QMainWindow):
             self._stroke_box = (min(b[0], y0), max(b[1], y1), min(b[2], x0), max(b[3], x1))
 
     def _stroke_result(self, region):
-        """Active layer inside `region` with the current stroke applied: (rgb, alpha)."""
         layer = self.layers.active_layer
         coverage = self._stroke_mask[region].astype(np.float32)[:, :, None] / 255.0
         alpha = layer.alpha[region].astype(np.float32)[:, :, None] / 255.0
 
         if self._stroke_tool == TOOL_ERASER:
-            # Eraser: make the layer transparent where the stroke passes
             new_alpha = alpha * (1.0 - coverage)
             return layer.rgb[region], (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8)
 
-        # Brush: paint the colour "over" the layer with the chosen opacity
         paint = coverage * self.brush_opacity
         color = np.array(self.brush_color, dtype=np.float32)
         rgb = layer.rgb[region].astype(np.float32)
@@ -1246,7 +1457,6 @@ class MainWindow(QMainWindow):
                 (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8))
 
     def _preview_shape(self, tool, pos):
-        """Live preview of a shape: only the rectangle around the shape is recomputed."""
         if self.layers is None:
             return
         if self._shape_view is None:
@@ -1319,6 +1529,11 @@ class MainWindow(QMainWindow):
         if self.layers.active != 0:
                 self.layers.active = 0
                 self._refresh_layers_panel()
+
+    @staticmethod
+    def _touches(layer, x, y, radius=6) -> bool:
+        near = layer.alpha[max(0, y - radius):y + radius + 1, max(0, x - radius):x + radius + 1]
+        return bool(near.any())
 
     def _piece_at(self, pos) -> bool:
         if self.layers is None:
@@ -1534,11 +1749,7 @@ class MainWindow(QMainWindow):
 
             percent, ok = QInputDialog.getInt(self, "Resize", "Scale (%):", 50, 1, 400)
             if ok:
-                # 1. Applique le redimensionnement NumPy
                 self._apply_edit(resize_scale, percent / 100)
-                
-                # 2. Réinitialise l'affichage à l'échelle 1:1 (100 %)
-                #    pour visualiser la nouvelle taille réelle sans l'étirer
                 if hasattr(self.canvas, "set_zoom_percentage"):
                     self.canvas.set_zoom_percentage(100)
                 elif hasattr(self.canvas, "reset_zoom"):

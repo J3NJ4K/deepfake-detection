@@ -1,16 +1,3 @@
-"""
-Layers panel (shown on the right when the "Layers" button is pressed):
-
-    [ + ] [ - ]
-    [x] [thumb] Layer 2      <- top layer first, like Paint / Photoshop
-    [x] [thumb] Layer 1
-    [x] [thumb] Background
-    Opacity  ━━━━●━━  100%
-
-The panel only displays the layers and emits signals; MainWindow does the work.
-Indexes in the signals are indexes in the LayerStack (0 = bottom layer).
-"""
-
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter, QColor
@@ -26,8 +13,6 @@ THUMB_SIZE = QSize(THUMB_W, THUMB_H)
 
 
 def layer_thumbnail(rgb: np.ndarray, alpha: np.ndarray) -> QIcon:
-    """Small preview of a layer, drawn over a checkerboard so transparency is visible."""
-    # Downscale with NumPy first (keep about 2x the thumbnail size), so big images stay fast
     step = max(1, min(alpha.shape[0] // (2 * THUMB_H),
                       alpha.shape[1] // (2 * THUMB_W)))
     rgba = np.ascontiguousarray(np.dstack([rgb[::step, ::step], alpha[::step, ::step]]))
@@ -42,7 +27,7 @@ def layer_thumbnail(rgb: np.ndarray, alpha: np.ndarray) -> QIcon:
     x = (THUMB_SIZE.width() - scaled.width()) // 2
     y = (THUMB_SIZE.height() - scaled.height()) // 2
     cell = 6
-    for cy in range(0, scaled.height(), cell):          # checkerboard
+    for cy in range(0, scaled.height(), cell):
         for cx in range(0, scaled.width(), cell):
             light = ((cx // cell) + (cy // cell)) % 2 == 0
             painter.fillRect(x + cx, y + cy, cell, cell, QColor(200, 200, 200) if light else QColor(150, 150, 150))
@@ -50,24 +35,22 @@ def layer_thumbnail(rgb: np.ndarray, alpha: np.ndarray) -> QIcon:
     painter.end()
     return QIcon(thumb)
 
-
 class LayersPanel(QWidget):
     add_requested = Signal()
     delete_requested = Signal()
-    active_changed = Signal(int)            # layer index
-    visibility_changed = Signal(int, bool)  # layer index, visible
-    opacity_changed = Signal(int, int)      # layer index, opacity in %
-    renamed = Signal(int, str)              # layer index, new name
+    active_changed = Signal(int)
+    visibility_changed = Signal(int, bool)
+    opacity_changed = Signal(int, int)
+    renamed = Signal(int, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._count = 0
-        self._thumb_cache = []   # (rgb, alpha, icon): only redraw thumbnails of layers that changed
+        self._thumb_cache = []
         self._setup_ui()
-        self.setEnabled(False)  # until an image is opened
+        self.setEnabled(False)
 
     def _setup_ui(self):
-        # Thin line on the left to separate the panel from the image (theme colours)
         self.setObjectName("LayersPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("#LayersPanel { border-left: 1px solid palette(mid); }")
@@ -81,7 +64,7 @@ class LayersPanel(QWidget):
         title.setFont(font)
         layout.addWidget(title)
 
-        # --- Add / delete buttons
+        # Add and delete buttons
         buttons = QHBoxLayout()
         self.btn_add = self._make_button("layer-add", "+", "Add a new layer")
         self.btn_add.clicked.connect(self.add_requested.emit)
@@ -92,7 +75,7 @@ class LayersPanel(QWidget):
         buttons.addStretch()
         layout.addLayout(buttons)
 
-        # --- Layer list (checkbox = visible, double-click = rename)
+        # Layer list
         self.list = QListWidget()
         self.list.setIconSize(THUMB_SIZE)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -101,7 +84,7 @@ class LayersPanel(QWidget):
         self.list.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.list, 1)
 
-        # --- Opacity of the selected layer
+        # Opacity of the selected layer
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Opacity"))
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -125,18 +108,14 @@ class LayersPanel(QWidget):
         button.setAutoRaise(True)
         return button
 
-    # ------------------------------------------------------------------
-    # Row <-> layer index (the list shows the top layer first)
-    # ------------------------------------------------------------------
+    # Convert between row and layer index
     def _row_to_index(self, row: int) -> int:
         return self._count - 1 - row
 
     def _index_to_row(self, index: int) -> int:
         return self._count - 1 - index
 
-    # ------------------------------------------------------------------
-    # Refresh from the LayerStack (called by MainWindow after every change)
-    # ------------------------------------------------------------------
+    # Update the display using the LayerStack
     def set_layers(self, stack) -> None:
         self.list.blockSignals(True)
         self.slider.blockSignals(True)
@@ -175,9 +154,8 @@ class LayersPanel(QWidget):
         self.slider.setValue(percent)
         self.opacity_label.setText(f"{percent}%")
 
-    # ------------------------------------------------------------------
+
     # User actions -> signals
-    # ------------------------------------------------------------------
     def _on_row_changed(self, row: int) -> None:
         if row >= 0:
             self.active_changed.emit(self._row_to_index(row))
