@@ -66,9 +66,9 @@ class LayersPanel(QWidget):
 
         # Add and delete buttons
         buttons = QHBoxLayout()
-        self.btn_add = self._make_button("layer-add", "+", "Add a new layer")
+        self.btn_add = self._make_button(None, "+", "Add a new layer")
         self.btn_add.clicked.connect(self.add_requested.emit)
-        self.btn_delete = self._make_button("layer-delete", "−", "Delete the selected layer")
+        self.btn_delete = self._make_button(None, "−", "Delete the selected layer")
         self.btn_delete.clicked.connect(self.delete_requested.emit)
         buttons.addWidget(self.btn_add)
         buttons.addWidget(self.btn_delete)
@@ -99,7 +99,7 @@ class LayersPanel(QWidget):
 
     def _make_button(self, icon_name, fallback_text, tooltip) -> QToolButton:
         button = QToolButton()
-        icon = load_icon(icon_name)
+        icon = load_icon(icon_name) if icon_name else None
         if icon:
             button.setIcon(icon)
         else:
