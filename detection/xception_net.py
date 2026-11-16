@@ -58,8 +58,8 @@ class Xception(nn.Module):
     def __init__(self, num_classes=2):
         super().__init__()
 
-        # layer names has to match the checkpoint keys exactly, or loading fails
-        # entry flow: reduces the image size and increases the number of channels
+
+        # reduces the image size and increases the number of channels
         self.conv1 = nn.Conv2d(3, 32, 3, 2, 0, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.relu = nn.ReLU(inplace=True)
@@ -69,10 +69,10 @@ class Xception(nn.Module):
         self.block1 = Block(64, 128, 2, 2, start_with_relu=False)
         self.block2 = Block(128, 256, 2, 2)
         self.block3 = Block(256, 728, 2, 2)
-        # middle flow: 8 identical blocks that refine the features
+        # middle flow
         for i in range(4, 12):
             setattr(self, f"block{i}", Block(728, 728, 3, 1))
-        # exit flow: final features and the classifier (real vs. manipulated)
+        # exit flow  (real vs. manipulated)
         self.block12 = Block(728, 1024, 2, 2, grow_first=False)
 
         self.conv3 = SeparableConv2d(1024, 1536, 3, 1, 1)
@@ -81,13 +81,13 @@ class Xception(nn.Module):
         self.bn4 = nn.BatchNorm2d(2048)
         self.last_linear = nn.Linear(2048, num_classes)
 
-        # unused here, but must exist so the checkpoint loads with strict=True
+
         self.adjust_channel = nn.Sequential(
             nn.Conv2d(2048, 512, 1, 1), nn.BatchNorm2d(512), nn.ReLU(inplace=False)
         )
 
     def features(self, x):
-        # runs the image through all conv layers, output is (B, 2048, 8, 8)
+        # runs the image through all conv layers
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.relu(self.bn2(self.conv2(x)))
         for i in range(1, 13):

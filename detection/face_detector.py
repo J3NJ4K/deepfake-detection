@@ -21,12 +21,12 @@ def detect_faces(image: np.ndarray, score_threshold: float = 0.75) -> list[tuple
         _detector = cv2.FaceDetectorYN.create(str(_MODEL_PATH), "", (sw, sh), score_threshold)
     _detector.setInputSize((sw, sh))
 
-    # YuNet expects BGR, and returns None when no faces are found
+
     _, faces = _detector.detect(cv2.cvtColor(small, cv2.COLOR_RGB2BGR))
     if faces is None:
         return []
 
-    # back to original image coordinates, (x, y, w, h) -> (x1, y1, x2, y2), kept inside the image
+    # back to original image coordinates
     boxes = []
     for x, y, bw, bh in faces[:, :4] / scale:
         boxes.append((max(0, int(x)), max(0, int(y)), min(w, int(x + bw)), min(h, int(y + bh))))
