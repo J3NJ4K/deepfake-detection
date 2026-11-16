@@ -374,7 +374,7 @@ class MainWindow(QMainWindow):
             return
         self.blur_radius = radius
         try:
-            self._set_image(blurred(radius))
+            self._set_image(blurred(radius), lambda image: gaussian_blur(image, kernel_size=2 * radius + 1))
             self.status_bar.showMessage(f"Gaussian Blur applied (radius {radius} px)", 3000)
         except Exception as e:
             self.status_bar.showMessage(f"Error with Gaussian Blur: {e}", 3000)
@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self._set_image(sobel_filter(self.current_image))
+            self._set_image(sobel_filter(self.current_image), sobel_filter)
             self.status_bar.showMessage("Sobel Filter applied", 3000)
         except Exception as e:
             self.status_bar.showMessage(f"Error with Sobel filter: {e}", 3000)
@@ -406,7 +406,7 @@ class MainWindow(QMainWindow):
             return
         self.threshold_value = value
         try:
-            self._set_image(thresholded(value))
+            self._set_image(thresholded(value), lambda image: binary_threshold(image, threshold=value))
             self.status_bar.showMessage(f"Binary Threshold applied ({value})", 3000)
         except Exception as e:
             self.status_bar.showMessage(f"Error with binary threshold: {e}", 3000)
@@ -417,7 +417,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self._set_image(histogram_threshold(self.current_image))
+            self._set_image(histogram_threshold(self.current_image), histogram_threshold)
             self.status_bar.showMessage("Otsu Threshold applied (threshold chosen automatically)", 3000)
         except Exception as e:
             self.status_bar.showMessage(f"Error with Otsu threshold: {e}", 3000)
@@ -703,13 +703,21 @@ class MainWindow(QMainWindow):
             self._update_fill_icon()
 
     # Undo / Redo
-    def _set_image(self, new_image: np.ndarray) -> None:
+    def _set_image(self, new_image: np.ndarray, operation=None) -> None:
+        """
+        Replace the pixels of the active layer (filters, brightness / contrast).
+        `operation` is the same filter as a function of an image: it is also applied to
+        the original pixels of the Background, so the eraser brings back the filtered image.
+        """
         if self.layers is None:
             self.current_image = new_image
             self._after_edit()
             return
         self._push_history()
-        self.layers.active_layer.rgb = new_image
+        layer = self.layers.active_layer
+        layer.rgb = new_image
+        if operation is not None and layer.original is not None:
+            layer.original = operation(layer.original)
         self._after_edit()
 
     def _push_history(self) -> None:
@@ -1309,7 +1317,8 @@ class MainWindow(QMainWindow):
         brightness, contrast = dialog.values()
         if not accepted or (brightness == 0 and contrast == 0):
             return
-        self._set_image(brightness_contrast(original, brightness, contrast))  # undo with Ctrl+Z
+        self._set_image(brightness_contrast(original, brightness, contrast),   # undo with Ctrl+Z
+                        lambda image: brightness_contrast(image, brightness, contrast))
         self.status_bar.showMessage(f"Brightness {brightness:+d}, contrast {contrast:+d}", 3000)
 
     def _fill_at(self, pos):
@@ -1445,8 +1454,17 @@ class MainWindow(QMainWindow):
         alpha = layer.alpha[region].astype(np.float32)[:, :, None] / 255.0
 
         if self._stroke_tool == TOOL_ERASER:
-            new_alpha = alpha * (1.0 - coverage)
-            return layer.rgb[region], (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8)
+            if layer.original is None:
+                # Normal layer: erasing makes it transparent
+                new_alpha = alpha * (1.0 - coverage)
+                return layer.rgb[region], (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8)
+            # Background: erasing removes the drawing and brings back the original image
+            original = layer.original[region].astype(np.float32)
+            rgb = layer.rgb[region].astype(np.float32)
+            new_alpha = coverage + alpha * (1.0 - coverage)          # the original is opaque
+            new_rgb = (original * coverage + rgb * alpha * (1.0 - coverage)) / np.maximum(new_alpha, 1e-6)
+            return (np.clip(new_rgb + 0.5, 0, 255).astype(np.uint8),
+                    (new_alpha[:, :, 0] * 255 + 0.5).astype(np.uint8))
 
         paint = coverage * self.brush_opacity
         color = np.array(self.brush_color, dtype=np.float32)

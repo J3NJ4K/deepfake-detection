@@ -4,15 +4,19 @@ import numpy as np
 
 class Layer:
     def __init__(self, name: str, rgb: np.ndarray, alpha: np.ndarray,
-                 visible: bool = True, opacity: float = 1.0):
+                 visible: bool = True, opacity: float = 1.0, original: np.ndarray | None = None):
         self.name = name
         self.rgb = rgb
         self.alpha = alpha
         self.visible = visible
         self.opacity = opacity
+        # What the eraser brings back: the opened (or new) image for the Background,
+        # so erasing removes only what was drawn on it. None: the eraser makes the
+        # layer transparent (empty layers, pasted pieces, text...).
+        self.original = original
 
     def copy(self) -> "Layer":
-        return Layer(self.name, self.rgb, self.alpha, self.visible, self.opacity)
+        return Layer(self.name, self.rgb, self.alpha, self.visible, self.opacity, self.original)
 
     def is_opaque(self) -> bool:
         """Return True if all pixels are fully opaque (alpha = 255)"""
@@ -37,7 +41,7 @@ class LayerStack:
     def from_image(cls, image: np.ndarray) -> "LayerStack":
         """Create a new document with one fully opaque "Background" layer containing the image."""
         alpha = np.full(image.shape[:2], 255, dtype=np.uint8)
-        return cls([Layer("Background", image, alpha)])
+        return cls([Layer("Background", image, alpha, original=image)])
 
     def snapshot(self) -> "LayerStack":
         """Create a copy for the undo/redo history"""
@@ -227,6 +231,8 @@ class LayerStack:
             alpha = np.ascontiguousarray(operation(alpha3, *args)[:, :, 0])
             new_layer = layer.copy()
             new_layer.rgb, new_layer.alpha = rgb, alpha
+            if layer.original is not None:       # rotate / resize / crop it the same way
+                new_layer.original = operation(layer.original, *args)
             new_layers.append(new_layer)
         self.layers = new_layers
 
