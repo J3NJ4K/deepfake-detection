@@ -222,3 +222,25 @@ models/*.pth
 models/*.pt
 models/*.onnx
 venv/
+
+#Added by Marga
+.idea/
+
+
+
+#test images
+/test*.jpg
+/test*.png
+
+#Added by Sigrid
+gradcam_out.jpg
+faces_out.jpg
+test_gradcam.py
+obama.jpg
+obama2.jpg
+test_univfd.py
+ai_pics/
+progan_test/
+
+# Models (DeepfakeBench / Xception)
+models/xception_best.pth
