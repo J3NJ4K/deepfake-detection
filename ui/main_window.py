@@ -271,20 +271,20 @@ class MainWindow(QMainWindow):
                                             "Brightness / Contrast")
 
         #Filters
-        self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, "blur", "Gaussian Blur (choose the strength)")
-        self.sobel_act = self._make_action("Sobel", self.apply_sobel_filter, "sobel",
+        self.blur_act = self._make_action("Blur", self.apply_gaussian_blur, None, "Gaussian Blur (choose the strength)")
+        self.sobel_act = self._make_action("Sobel", self.apply_sobel_filter, None,
                                            "Sobel Filter (Edge Detection)")
-        self.threshold_act = self._make_action("Threshold", self.apply_binary_threshold, "threshold",
+        self.threshold_act = self._make_action("Threshold", self.apply_binary_threshold, None,
                                                "Binary Threshold (choose the threshold)")
-        self.otsu_act = self._make_action("Otsu", self.apply_histogram_threshold, "otsu",
+        self.otsu_act = self._make_action("Otsu", self.apply_histogram_threshold, None,
                                           "Automatic Threshold (Otsu)")
 
         #Detection
-        self.face_detect_act = self._make_action("Faces", self.run_face_detection, "face",
+        self.face_detect_act = self._make_action("Faces", self.run_face_detection, None,
                                                  "Detect Faces")
         self.cut_faces_act = self._make_action("Cut faces", self.cut_faces, "smart_cut",
                                                "Cut out every face as a sticker you can drag")
-        self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, "deepfake",
+        self.deepfake_act = self._make_action("Deepfake", self.run_deepfake_analysis, None,
                                               "Run Deepfake Analysis")
 
     def _on_tool_clicked(self, action):
@@ -808,7 +808,7 @@ class MainWindow(QMainWindow):
         self.layers_act.setCheckable(True)
         self.layers_act.toggled.connect(lambda on: self._show_side_panel(self.layers_panel, on))
 
-        self.results_act = self._make_action("Results", None, "results",
+        self.results_act = self._make_action("Results", None, None,
                                              "Show / hide the detection results")
         self.results_act.setCheckable(True)
         self.results_act.toggled.connect(lambda on: self._show_side_panel(self.results_panel, on))
