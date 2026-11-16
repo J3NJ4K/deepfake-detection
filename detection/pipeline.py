@@ -3,7 +3,7 @@ from detection.face_detector import detect_faces
 from detection.preprocess import crop_box, crop_face, to_tensor
 from detection.classifier import load_model, predict
 from detection.gradcam import grad_cam
-from detection.commfor import load_commfor, predict_commfor, to_commfor_tensor
+from detection.commfor import load_commfor, predict_commfor, commfor_tensor
 
 GENERATED_THRESHOLD = 0.5
 
@@ -18,7 +18,7 @@ def analyze_deepfake(image: np.ndarray) -> dict:
     if _commfor is None:
         _commfor = load_commfor()
 
-    # for each detected face: crops it, converts to a tensor and gets the manipulation probability
+    #crops face, converts to a tensor and gets the manipulation probability
     faces = []
     for bbox in detect_faces(image):
         face = crop_face(image, bbox)
@@ -32,6 +32,6 @@ def analyze_deepfake(image: np.ndarray) -> dict:
 
     # commfor only on the whole image
     return {
-        "generated_probability": predict_commfor(_commfor, to_commfor_tensor(image)),
+        "generated_probability": predict_commfor(_commfor, commfor_tensor(image)),
         "faces": faces,
     }

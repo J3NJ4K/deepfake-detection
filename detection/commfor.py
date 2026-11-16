@@ -22,7 +22,7 @@ def load_commfor() -> torch.nn.Module:
     return model
 
 
-def to_commfor_tensor(image: np.ndarray) -> torch.Tensor:
+def commfor_tensor(image: np.ndarray) -> torch.Tensor:
     # shortest side -> 440, then center crop 384
     h, w = image.shape[:2]
     scale = resize_size / min(h, w)
