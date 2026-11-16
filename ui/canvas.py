@@ -121,9 +121,7 @@ class ImageCanvas(QGraphicsView):
         self._tool = TOOL_HAND
         self.set_tool(TOOL_HAND)
 
-    # ------------------------------------------------------------------
     # Outils
-    # ------------------------------------------------------------------
     @property
     def tool(self) -> str:
         return self._tool
@@ -210,21 +208,19 @@ class ImageCanvas(QGraphicsView):
             else:
                 self._update_cursor()
 
-    # ------------------------------------------------------------------
-    # Free transform of an imported image (move / resize / rotate)
-    # ------------------------------------------------------------------
+
+    # Free transform: Move, resize, and rotate an imported image.
     def start_placement(self, placement, pixmap: QPixmap, opacity: float = 1.0) -> None:
-        """Show the image of `placement` above the picture, with a frame and handles."""
         self.end_placement()
         self._placement = placement
 
         piece = QGraphicsPixmapItem(pixmap)
         piece.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         piece.setOpacity(opacity)
-        piece.setZValue(0.5)          # above the picture, below the selection / handles
+        piece.setZValue(0.5)
 
         pen = QPen(PLACEMENT_COLOR, 1.5)
-        pen.setCosmetic(True)         # same thickness whatever the zoom
+        pen.setCosmetic(True)         #same thickness whatever the zoom
         frame = QGraphicsPolygonItem()
         frame.setPen(pen)
         frame.setZValue(3)
@@ -241,7 +237,8 @@ class ImageCanvas(QGraphicsView):
                 handle = QGraphicsRectItem(-half, -half, PLACEMENT_HANDLE, PLACEMENT_HANDLE)
             handle.setPen(pen)
             handle.setBrush(QColor(255, 255, 255))
-            # Drawn in screen pixels: the handles keep the same size when zooming
+
+            # The handles stay the same size on the screen, even when zooming in or out.
             handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
             handle.setZValue(4)
             items[name] = handle
@@ -289,6 +286,7 @@ class ImageCanvas(QGraphicsView):
         elif kind == ROTATE:
             shape = Qt.CursorShape.PointingHandCursor
         elif kind in HANDLES:
+
             # Pick the double arrow closest to the direction of the (maybe rotated) handle
             step = round((self._placement.handle_direction(kind) % 180) / 45) % 4
             shape = [Qt.CursorShape.SizeHorCursor, Qt.CursorShape.SizeFDiagCursor,
@@ -302,7 +300,7 @@ class ImageCanvas(QGraphicsView):
             return False
         kind = self._placement_hit(event)
         if kind is None:
-            self.placement_done.emit()       # click outside = done
+            self.placement_done.emit()
         else:
             pos = self._image_pos(event)
             self._placement.start_drag(kind, pos.x(), pos.y())
@@ -328,9 +326,7 @@ class ImageCanvas(QGraphicsView):
             return True
         return False
 
-    # ------------------------------------------------------------------
-    # Text being typed: clicks inside it go to the text (cursor, selection)
-    # ------------------------------------------------------------------
+    # While typing text, clicking inside the text box lets users move the cursor or select text
     def _on_text(self, event: QMouseEvent) -> bool:
         if self.text_item is None:
             return False
@@ -340,12 +336,12 @@ class ImageCanvas(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if self._on_text(event):
-            super().mouseDoubleClickEvent(event)   # double-click = select a word
+            super().mouseDoubleClickEvent(event)
             return
         if self._placement is not None and event.button() == Qt.MouseButton.LeftButton:
             if self._placement_hit(event) == MOVE:
                 self._placement.end_drag()
-                self.placement_done.emit()   # double-click on the image = done
+                self.placement_done.emit()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
@@ -356,10 +352,10 @@ class ImageCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton and self._on_text(event):
             self._text_mouse = True
-            super().mousePressEvent(event)         # the text item places its cursor
+            super().mousePressEvent(event)
             return
-        # Zoom tool: left click = zoom in, right click = zoom out
 
+        # Zoom tool: left click = zoom in, right click = zoom out
         if self._tool == TOOL_ZOOM and not self._pixmap_item.pixmap().isNull():
             if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
                 spot = self._image_pos(event)
@@ -386,7 +382,7 @@ class ImageCanvas(QGraphicsView):
             event.accept()
             return
         if self._text_mouse:
-            super().mouseMoveEvent(event)          # selecting text with the mouse
+            super().mouseMoveEvent(event)
             return
         if self._grabbing:
             self.tool_dragged.emit(TOOL_SELECT, self._image_pos(event))
@@ -450,9 +446,8 @@ class ImageCanvas(QGraphicsView):
         self._selection_item.hide()
         self._lasso_item.hide()
 
-    # ------------------------------------------------------------------
+
     # Affichage et zoom
-    # ------------------------------------------------------------------
     def set_pixmap(self, pixmap: QPixmap):
         """Met à jour l'image affichée."""
         self._pixmap_item.setPixmap(pixmap)
@@ -463,12 +458,13 @@ class ImageCanvas(QGraphicsView):
         """Ctrl + molette : zoom centré sur la souris. Sans Ctrl : défilement normal."""
         if (event.modifiers() & Qt.KeyboardModifier.ControlModifier
                 and not self._pixmap_item.pixmap().isNull()):
-            steps = event.angleDelta().y() / 120   # one notch of the wheel = 120
+            steps = event.angleDelta().y() / 120
             if steps:
                 cursor = event.position().toPoint()
-                before = self.mapToScene(cursor)               # image point under the mouse
+                before = self.mapToScene(cursor)
                 self.apply_zoom(self._current_zoom * (1.25 ** steps))
                 after = self.mapToScene(cursor)
+
                 # Scroll so that the same image point stays under the mouse
                 shift = (before - after) * self._current_zoom
                 h, v = self.horizontalScrollBar(), self.verticalScrollBar()

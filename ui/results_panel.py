@@ -1,25 +1,3 @@
-"""
-Side panel with the results of the last detection, instead of pop-up windows:
-
-    Detection results                 ×
-    Likely AI-generated · 2 faces, 1 likely manipulated
-    ┌──────────────────────────────┐
-    │ Whole image    AI-generated  │   <- UnivFD (whole picture)
-    │ ██████████████░░  87% AI     │
-    └──────────────────────────────┘
-    ┌──────────────────────────────┐
-    │ Face 1                 Fake  │
-    │ ██████████████░░░░  78% fake │
-    ├──────────────────────────────┤
-    │ Face 2                 Real  │
-    │ ███░░░░░░░░░░░░░░░  12% fake │
-    └──────────────────────────────┘
-    Probability that the face was manipulated. Above 50% = likely fake.
-    Automatic estimate: it can be wrong.
-
-Clicking a face emits face_selected(index) so MainWindow can show it on the image.
-"""
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QProgressBar,
@@ -28,11 +6,11 @@ from PySide6.QtWidgets import (
 
 FAKE_COLOR = "#d93b3b"
 REAL_COLOR = "#2e9e4f"
-FACE_COLOR = "#0096ff"   # same blue as the boxes of the face detection
+FACE_COLOR = "#0096ff"
 
 
 class _FaceRow(QWidget):
-    """One face of the list: name + verdict, and a probability bar (if any)."""
+    """Show each detected face with its name, result, and a probability bar if available."""
 
     def __init__(self, title: str, verdict: str = "", color: str = "", probability=None,
                  bar_format: str = "%p% fake"):
@@ -66,8 +44,8 @@ class _FaceRow(QWidget):
 
 
 class ResultsPanel(QWidget):
-    face_selected = Signal(int)   # index of the clicked face
-    closed = Signal()             # the × button was pressed
+    face_selected = Signal(int)
+    closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,7 +56,7 @@ class ResultsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 6, 6)
 
-        # --- title + close button
+        #title and close button
         top = QHBoxLayout()
         title = QLabel("Detection results")
         font = title.font()
@@ -123,7 +101,6 @@ class ResultsPanel(QWidget):
         self.note.setEnabled(False)   # grey text
         layout.addWidget(self.note)
 
-    # ------------------------------------------------------------------
     def clear(self) -> None:
         self.list.clear()
         self._set_image_row(None)
@@ -132,7 +109,6 @@ class ResultsPanel(QWidget):
         self.note.setText("")
 
     def _set_image_row(self, row) -> None:
-        """Replace the whole-image result (None = hide it)."""
         if self._image_row is not None:
             self.image_area_layout.removeWidget(self._image_row)
             self._image_row.deleteLater()
@@ -144,7 +120,6 @@ class ResultsPanel(QWidget):
             self.image_area.show()
 
     def show_faces(self, boxes) -> None:
-        """Results of the face detection: list of (x1, y1, x2, y2)."""
         self._set_image_row(None)
         self.faces_title.hide()
         self.list.blockSignals(True)
@@ -157,12 +132,7 @@ class ResultsPanel(QWidget):
         self.note.setText("Click a face to show it on the image." if n else "")
 
     def show_deepfake(self, faces, generated_probability=None, threshold: float = 0.5) -> None:
-        """
-        Results of the deepfake analysis:
-        - generated_probability: probability that the WHOLE image is AI-generated (UnivFD)
-        - faces: list of {"bbox", "manipulation_probability", ...} (Xception, one per face)
-        """
-        # --- whole image
+        # whole image
         parts = []
         if generated_probability is None:
             self._set_image_row(None)
@@ -173,7 +143,7 @@ class ResultsPanel(QWidget):
                                          "%p% AI-generated"))
             parts.append("Likely AI-generated" if is_ai else "Likely not AI-generated")
 
-        # --- faces
+        #faces
         self.list.blockSignals(True)
         self.list.clear()
         fakes = 0
@@ -203,7 +173,6 @@ class ResultsPanel(QWidget):
         notes.append("Automatic estimates: they can be wrong.")
         self.note.setText(" ".join(notes))
 
-    # ------------------------------------------------------------------
     def _add_row(self, row: QWidget) -> None:
         item = QListWidgetItem()
         item.setSizeHint(row.sizeHint())

@@ -1,4 +1,3 @@
-from PySide6 import QtSvg  # Active le moteur de rendu SVG
 import sys
 from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow

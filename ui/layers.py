@@ -1,25 +1,6 @@
-"""
-Layer system for the editor (no Qt in here, only NumPy, so it can be tested alone).
-
-Each layer has:
-    rgb     -> H x W x 3 uint8 (same format as everywhere else in the project)
-    alpha   -> H x W uint8, 0 = transparent, 255 = opaque
-    visible -> bool
-    opacity -> float between 0 and 1
-
-All layers always have the same size. Layer 0 is the bottom one ("Background").
-The image shown on screen (and saved, and analysed) is the composite of all
-visible layers, drawn from bottom to top over a white background.
-
-Like the rest of the code, arrays are never modified in place: an edit replaces
-layer.rgb / layer.alpha with new arrays. This is what makes snapshots for
-undo/redo cheap (they share the arrays and only copy the small Layer objects).
-"""
-
 from __future__ import annotations
 
 import numpy as np
-
 
 class Layer:
     def __init__(self, name: str, rgb: np.ndarray, alpha: np.ndarray,
@@ -31,11 +12,10 @@ class Layer:
         self.opacity = opacity
 
     def copy(self) -> "Layer":
-        # Shallow copy on purpose: arrays are shared (they are never modified in place)
         return Layer(self.name, self.rgb, self.alpha, self.visible, self.opacity)
 
     def is_opaque(self) -> bool:
-        """True if every pixel is fully opaque (alpha = 255)."""
+        """Return True if all pixels are fully opaque (alpha = 255)"""
         return bool(self.alpha.min() == 255)
 
 
@@ -43,45 +23,41 @@ class LayerStack:
     def __init__(self, layers: list[Layer], active: int = 0, next_number: int = 1):
         if not layers:
             raise ValueError("A layer stack needs at least one layer")
-        self.layers = layers          # index 0 = bottom
-        self.active = active          # index of the layer the tools draw on
+        self.layers = layers
+        self.active = active
         self._next_number = next_number
-        # Cached merges of the layers below / above the active one (see composite())
+
+        # Store the combined layers below and above the active layer for reuse
         self._below_cache = (None, None)
         self._above_cache = (None, None)
         self._full_cache = (None, None)
 
-    # ------------------------------------------------------------------
-    # Creation / copies
-    # ------------------------------------------------------------------
+    # Creation
     @classmethod
     def from_image(cls, image: np.ndarray) -> "LayerStack":
-        """New document: a single opaque "Background" layer containing the image."""
+        """Create a new document with one fully opaque "Background" layer containing the image."""
         alpha = np.full(image.shape[:2], 255, dtype=np.uint8)
         return cls([Layer("Background", image, alpha)])
 
     def snapshot(self) -> "LayerStack":
-        """Copy used by the undo/redo history."""
+        """Create a copy for the undo/redo history"""
         return LayerStack([layer.copy() for layer in self.layers], self.active, self._next_number)
 
-    # ------------------------------------------------------------------
+
     # Info
-    # ------------------------------------------------------------------
     @property
     def active_layer(self) -> Layer:
         return self.layers[self.active]
 
     @property
     def size(self) -> tuple[int, int]:
-        """(height, width) of every layer."""
         return self.layers[0].rgb.shape[:2]
 
     def __len__(self) -> int:
         return len(self.layers)
 
-    # ------------------------------------------------------------------
+
     # Add / delete
-    # ------------------------------------------------------------------
     def add_layer(self, name: str | None = None) -> Layer:
         """Add an empty, fully transparent layer just above the active one and select it."""
         height, width = self.size
@@ -110,22 +86,11 @@ class LayerStack:
         if self.active >= index and self.active > 0:
             self.active -= 1
 
-    # ------------------------------------------------------------------
     # Composite
-    # ------------------------------------------------------------------
     def composite(self, override: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
-        """
-        Merge the visible layers into one RGB uint8 image (over a white background).
-        `override` = (rgb, alpha) temporarily replaces the active layer, used for live previews.
-
-        To stay fast while drawing, the layers below and above the active layer are
-        merged once and kept in a cache: as long as they do not change, each mouse move
-        only has to blend the active layer between these two cached images.
-        """
         layer = self.active_layer
         rgb, alpha = override if override is not None else (layer.rgb, layer.alpha)
 
-        # Fast path: one opaque layer -> no computation at all (same speed as without layers)
         if (len(self.layers) == 1 and layer.visible and layer.opacity >= 1.0
                 and (alpha is layer.alpha and layer.is_opaque() or alpha.min() == 255)):
             return rgb
@@ -134,7 +99,6 @@ class LayerStack:
         if override is None:
             return full
 
-        # Preview: only the rectangle that the drawing changed has to be recomputed
         changed = (alpha != layer.alpha) | (rgb[:, :, 0] != layer.rgb[:, :, 0]) \
             | (rgb[:, :, 1] != layer.rgb[:, :, 1]) | (rgb[:, :, 2] != layer.rgb[:, :, 2])
         rows = np.flatnonzero(changed.any(axis=1))
@@ -160,10 +124,6 @@ class LayerStack:
         return result
 
     def remember_composite(self, image: np.ndarray) -> None:
-        """
-        Tell the stack that `image` is the merge of the layers in their current state
-        (the brush already computed it while drawing), so it is not recomputed.
-        """
         self._full_cache = (self._state(self.layers) + [self.active], image)
 
     def _blend(self, region, rgb, alpha) -> np.ndarray:
@@ -210,10 +170,6 @@ class LayerStack:
         return out
 
     def _above(self):
-        """
-        Layers above the active one merged into (color, coverage), cached, so that
-        final = image * (1 - coverage) + color. None if there is nothing visible above.
-        """
         layers = [l for l in self.layers[self.active + 1:] if l.visible and l.opacity > 0]
         if not layers:
             return None
@@ -231,22 +187,8 @@ class LayerStack:
         self._above_cache = (state, (color, coverage))
         return color, coverage
 
-    # ------------------------------------------------------------------
     # Edits
-    # ------------------------------------------------------------------
     def edit_active(self, operation, args=(), erase: bool = False) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Compute (new_rgb, new_alpha) of the active layer after a drawing operation,
-        WITHOUT changing the stack (so it can also be used for previews).
-
-        operation(image, *args) is any function of the project that takes and returns
-        an RGB image (brush stroke, shape, flood fill...).
-
-        To know which pixels the operation painted, it is run a second time on the
-        inverted image: a painted pixel gets the same colour in both results, while an
-        untouched pixel keeps its (different) original value. Painted pixels become
-        opaque, or transparent if `erase` is True (eraser tool).
-        """
         layer = self.active_layer
         result = operation(layer.rgb, *args)
 
@@ -262,12 +204,6 @@ class LayerStack:
         return result, np.where(painted, 255, layer.alpha).astype(np.uint8)
 
     def edit_region(self, operation, region, erase: bool = False) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Same as edit_active, but only on a rectangle of the active layer
-        (region = (row slice, column slice)); operation receives the cropped image,
-        so its coordinates must be relative to the top-left corner of the region.
-        Much faster for previews, since a shape only covers a small part of the image.
-        """
         layer = self.active_layer
         rgb = np.ascontiguousarray(layer.rgb[region])
         alpha = layer.alpha[region]
@@ -281,17 +217,9 @@ class LayerStack:
         return result, np.where(painted, 255, alpha).astype(np.uint8)
 
     def blend_region(self, region, rgb: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-        """
-        What the screen shows inside `region` if the active layer had (rgb, alpha) there
-        (rgb and alpha are already cropped to the region). Used by the live previews.
-        """
         return self._blend(region, rgb, alpha)
 
     def apply_to_all(self, operation, args=()) -> None:
-        """
-        Apply a geometric operation (rotate, flip, resize, crop...) to every layer,
-        so that all layers keep the same size and stay aligned.
-        """
         new_layers = []
         for layer in self.layers:
             rgb = operation(layer.rgb, *args)
@@ -304,10 +232,6 @@ class LayerStack:
 
 
 def overlay_from_drawing(draw, height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Build a transparent layer containing only what `draw(image) -> image` draws
-    (used to put detection boxes on their own layer).
-    """
     on_black = draw(np.zeros((height, width, 3), dtype=np.uint8))
     on_white = draw(np.full((height, width, 3), 255, dtype=np.uint8))
     painted = on_black[:, :, 0] == on_white[:, :, 0]
